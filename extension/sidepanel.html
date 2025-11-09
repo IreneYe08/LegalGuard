@@ -20,6 +20,56 @@
             flex-direction: column;
         }
 
+        /* Utility classes (Tailwind-inspired) */
+        .p-3 { padding: 0.75rem; }
+        .mb-2 { margin-bottom: 0.5rem; }
+        .mb-1 { margin-bottom: 0.25rem; }
+        .rounded-xl { border-radius: 0.75rem; }
+        .border { border-width: 1px; border-style: solid; border-color: #e5e7eb; }
+        .border-gray-100 { border-color: #f1f5f9; }
+        .shadow-sm { box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08); }
+        .bg-white { background: #ffffff; }
+        .text-sm { font-size: 0.875rem; line-height: 1.3; }
+        .text-xs { font-size: 0.75rem; line-height: 1.25; }
+        .font-semibold { font-weight: 600; }
+        .font-medium { font-weight: 500; }
+        .text-gray-800 { color: #1f2937; }
+        .text-gray-700 { color: #374151; }
+        .text-gray-600 { color: #4b5563; }
+        .text-gray-500 { color: #6b7280; }
+        .line-clamp-1,
+        .line-clamp-2 {
+            display: -webkit-box;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+        .line-clamp-1 { -webkit-line-clamp: 1; line-clamp: 1; }
+        .line-clamp-2 { -webkit-line-clamp: 2; line-clamp: 2; }
+        .list-disc { list-style-type: disc; }
+        .list-inside { padding-left: 1.25rem; }
+        .space-y-0\.5 > * + * { margin-top: 0.125rem; }
+
+        .lg-clause-stack {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .lg-clause-card {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            line-height: 1.35;
+        }
+
+        .lg-clause-card ul {
+            margin: 0;
+            padding-left: 1rem;
+        }
+
+        .lg-clause-card li {
+            color: #6b7280;
+        }
+
         /* Header */
         .header {
             border-bottom: 1px solid #e5e7eb;
@@ -27,6 +77,7 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
+            position: relative;
         }
 
         .header-left {
@@ -50,6 +101,39 @@
         .title {
             font-size: 16px;
             font-weight: 600;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .mute-button {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+            background: #f8fafc;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            cursor: pointer;
+            transition: background 0.2s ease, transform 0.1s ease;
+        }
+
+        .mute-button:hover {
+            background: #e2e8f0;
+        }
+
+        .mute-button:active {
+            transform: scale(0.96);
+        }
+
+        .mute-button:focus-visible {
+            outline: 2px solid #6366f1;
+            outline-offset: 2px;
         }
 
         /* Content */
@@ -180,13 +264,21 @@
         }
 
         /* Chat */
-        .chat-container {
+        .chat-shell {
             background: #f9fafb;
             border: 1px solid #e5e7eb;
             border-radius: 16px;
-            height: 400px;
             display: flex;
             flex-direction: column;
+            min-height: 420px;
+        }
+
+        .chat-container {
+            position: relative;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            padding-top: 4px;
         }
 
         .messages {
@@ -253,7 +345,7 @@
             padding: 8px 12px;
             border-radius: 8px;
             font-size: 12px;
-            margin-bottom: 12px;
+            margin: 8px 16px 10px;
             text-align: center;
         }
 
@@ -280,7 +372,7 @@
             display: flex;
             align-items: center;
             gap: 12px;
-            margin-bottom: 12px;
+            margin-bottom: 8px;
             padding: 12px;
             background: #f8fafc;
             border-radius: 8px;
@@ -463,10 +555,12 @@
         }
 
         /* Input */
-        .input-area {
+        .chat-input-area {
             border-top: 1px solid #e5e7eb;
             padding: 16px;
             background: white;
+            border-bottom-left-radius: 16px;
+            border-bottom-right-radius: 16px;
         }
 
         .quick-actions {
@@ -493,33 +587,70 @@
             border-color: #667eea;
         }
 
-        .mute-controls {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-top: 12px;
+        .input:disabled {
+            background: #f8fafc;
+            cursor: not-allowed;
+            color: #94a3b8;
         }
 
-        .mute-toggle {
-            display: flex;
+        .chat-input-area .input-group button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .model-download-overlay {
+            position: absolute;
+            inset: 0;
+            background: rgba(255, 255, 255, 0.92);
+            border-bottom: 1px solid #e5e7eb;
+            display: none;
+            flex-direction: column;
             align-items: center;
-            gap: 6px;
+            justify-content: center;
+            padding: 24px;
+            text-align: center;
+            gap: 12px;
+            color: #475569;
+            z-index: 2;
+        }
+
+        .model-download-overlay.visible {
+            display: flex;
+        }
+
+        .model-download-overlay .spinner {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            border: 3px solid rgba(99, 102, 241, 0.2);
+            border-top-color: #6366f1;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .chat-hint {
             font-size: 12px;
-            color: #6b7280;
-        }
-
-        .mute-toggle input[type="checkbox"] {
-            margin: 0;
+            color: #94a3b8;
+            text-align: center;
+            padding: 4px 16px 6px;
         }
     </style>
 </head>
 
 <body>
     <!-- Header -->
-    <div class="header">
+        <div class="header">
         <div class="header-left">
             <div class="logo">🛡️</div>
             <div class="title">LegalGuard Analysis</div>
+        </div>
+        <div class="header-actions">
+            <button class="mute-button" id="muteToggleBtn" type="button" title="Mute notifications" aria-label="Mute notifications" aria-pressed="false">🔔</button>
         </div>
     </div>
 
@@ -575,49 +706,45 @@
                     Translation ready
                 </div>
             </div>
-            <div class="chat-container">
-                <div class="api-status" id="apiStatus" style="display: none;">
-                    Checking AI availability...
+            <div class="chat-shell">
+                <div class="chat-container">
+                    <div class="api-status" id="apiStatus" style="display: none;">
+                        Checking AI availability...
+                    </div>
+                    <div class="model-download-overlay" id="modelDownloadOverlay">
+                        <div class="spinner"></div>
+                        <div class="model-download-message" id="modelDownloadMessage">
+                            Downloading Chrome AI model (first-time setup)...<br>Please wait a few minutes.
+                        </div>
+                    </div>
+                    <div class="chat-hint">
+                        ↓ AI answers will appear below
+                    </div>
+                    <div class="messages" id="messages">
+                        <div class="empty-state">
+                            Start by highlighting a clause or asking a question below.<br>
+                            <small>All processing happens locally on your device.</small>
+                        </div>
+                    </div>
                 </div>
-                <div class="messages" id="messages">
-                    <div class="empty-state">
-                        Start by highlighting a clause or asking a question below.<br>
-                        <small>All processing happens locally on your device.</small>
+                <div class="chat-input-area">
+                    <div class="quick-actions">
+                        <button class="btn btn-outline btn-small" id="explain-btn">Explain</button>
+                        <button class="btn btn-outline btn-small" id="eli3-btn">Explain like I'm 3</button>
+                        <button class="btn btn-outline btn-small" id="clear-btn">Clear Chat</button>
+                    </div>
+                    <div class="input-group">
+                        <input type="text" class="input" id="chat-input" placeholder="Ask what this clause means..." />
+                        <button class="btn btn-primary" id="send-btn" disabled>📤</button>
+                    </div>
+                    <div class="input-hint" id="inputHint" style="font-size: 11px; color: #9ca3af; margin-top: 8px; text-align: center;">
+                        Press Enter to send, Shift+Enter for new line
                     </div>
                 </div>
             </div>
             <p style="font-size: 12px; color: #9ca3af; text-align: center; margin-top: 8px; font-style: italic;">
                 All your questions stay local — we never send them anywhere.
             </p>
-        </div>
-
-        <!-- Mute Controls -->
-        <div class="section">
-            <div class="section-title">Settings</div>
-            <div class="card">
-                <div class="mute-controls">
-                    <label class="mute-toggle">
-                        <input type="checkbox" id="muteToggle">
-                        Mute notifications for this site
-                    </label>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Input Area -->
-    <div class="input-area">
-        <div class="quick-actions">
-            <button class="btn btn-outline btn-small" id="explain-btn">Explain</button>
-            <button class="btn btn-outline btn-small" id="eli3-btn">Explain like I'm 3</button>
-            <button class="btn btn-outline btn-small" id="clear-btn">Clear Chat</button>
-        </div>
-        <div class="input-group">
-            <input type="text" class="input" id="chat-input" placeholder="Ask what this clause means..." />
-            <button class="btn btn-primary" id="send-btn" disabled>📤</button>
-        </div>
-        <div class="input-hint" id="inputHint" style="font-size: 11px; color: #9ca3af; margin-top: 8px; text-align: center;">
-            Press Enter to send, Shift+Enter for new line
         </div>
     </div>
 

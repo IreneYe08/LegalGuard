@@ -10,12 +10,14 @@
   },
   "action": {
     "default_title": "LegalGuard",
+    "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png"
     }
   },
   "permissions": ["contextMenus","storage","scripting","activeTab","tabs","sidePanel"],
+  "host_permissions": ["<all_urls>"],
   "side_panel": { "default_path": "sidepanel.html" },
   "background": { "service_worker": "background.js", "type": "module" },
   "content_scripts": [

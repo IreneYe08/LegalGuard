@@ -7,6 +7,11 @@ class LegalGuardSidePanel {
         this.aiSession = null;
         this.aiAvailable = false;
         this.aiAvailabilityState = null; // Store availability state ('available', 'downloadable', 'downloading', 'unavailable')
+        this.promptInputEnabled = false;
+        this.elements = {};
+        this.modelStatus = 'checking';
+        this.summaryRetryTimer = null;
+        this.hasInputText = false;
         this.currentTabId = null;
         this.conversationHistory = [];
         this.isStreaming = false;
@@ -32,6 +37,10 @@ class LegalGuardSidePanel {
         
         // Get current tab ID
         await this.getCurrentTab();
+
+        // Cache key UI elements
+        this.cacheUIElements();
+        this.syncPromptControls();
         
         // Set up event listeners
         this.setupEventListeners();
@@ -58,6 +67,68 @@ class LegalGuardSidePanel {
         await this.loadMuteState();
     }
 
+    cacheUIElements() {
+        this.elements = {
+            sendBtn: document.getElementById('send-btn'),
+            chatInput: document.getElementById('chat-input'),
+            modelOverlay: document.getElementById('modelDownloadOverlay'),
+            modelOverlayMessage: document.getElementById('modelDownloadMessage'),
+            muteToggleBtn: document.getElementById('muteToggleBtn')
+        };
+    }
+
+    syncPromptControls() {
+        const { chatInput, sendBtn } = this.elements;
+
+        if (chatInput) {
+            chatInput.disabled = !this.promptInputEnabled;
+        }
+
+        if (sendBtn) {
+            const shouldDisable = !this.promptInputEnabled || this.isStreaming || !this.hasInputText;
+            sendBtn.disabled = shouldDisable;
+        }
+    }
+
+    setPromptInputEnabled(enabled) {
+        this.promptInputEnabled = enabled;
+        this.syncPromptControls();
+    }
+
+    updateModelDownloadUI(status, message) {
+        this.modelStatus = status;
+        const { modelOverlay, modelOverlayMessage } = this.elements;
+
+        if (modelOverlayMessage && typeof message === 'string') {
+            modelOverlayMessage.innerHTML = message;
+        }
+
+        if (modelOverlay) {
+            if (status === 'downloading' || status === 'preparing') {
+                modelOverlay.classList.add('visible');
+            } else {
+                modelOverlay.classList.remove('visible');
+            }
+        }
+
+        if (status === 'downloading' || status === 'preparing') {
+            this.setPromptInputEnabled(false);
+        } else if (status === 'ready') {
+            this.setPromptInputEnabled(true);
+        }
+    }
+
+    updateMuteButton(isMuted) {
+        const muteBtn = this.elements?.muteToggleBtn || document.getElementById('muteToggleBtn');
+        if (!muteBtn) return;
+
+        muteBtn.textContent = isMuted ? '🔕' : '🔔';
+        muteBtn.dataset.state = isMuted ? 'muted' : 'unmuted';
+        muteBtn.setAttribute('aria-pressed', isMuted ? 'true' : 'false');
+        muteBtn.setAttribute('aria-label', isMuted ? 'Unmute notifications' : 'Mute notifications');
+        muteBtn.setAttribute('title', isMuted ? 'Unmute notifications' : 'Mute notifications');
+    }
+
     async getCurrentTab() {
         try {
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -80,15 +151,11 @@ class LegalGuardSidePanel {
             console.log('[LegalGuard] AI availability:', availability);
             this.aiAvailabilityState = availability;
 
-            // Enable send button (will create session on demand with user gesture)
-            const sendBtn = document.getElementById('send-btn');
-            if (sendBtn) {
-                // Only disable if completely unavailable, otherwise enable for on-demand creation
-                sendBtn.disabled = (availability === 'unavailable');
-            }
-
             if (availability === 'unavailable') {
                 this.updateAPIStatus('unavailable', 'AI not available on this device');
+                this.aiAvailable = false;
+                this.updateModelDownloadUI('hidden');
+                this.setPromptInputEnabled(false);
                 return;
             }
 
@@ -96,6 +163,8 @@ class LegalGuardSidePanel {
             // Chrome requires a user gesture to download models
             if (availability === 'downloadable' || availability === 'downloading') {
                 this.updateAPIStatus('downloadable', 'Click "Ask" to download and enable AI (requires user gesture)');
+                this.aiAvailable = false;
+                this.updateModelDownloadUI('downloading', 'Downloading Chrome AI model (first-time setup)...<br>Please wait a few minutes.');
                 // Don't create session here - wait for user gesture
                 return;
             } else if (availability === 'available') {
@@ -104,9 +173,13 @@ class LegalGuardSidePanel {
                     this.aiSession = await LanguageModel.create();
                     this.aiAvailable = true;
                     this.updateAPIStatus('available', 'AI ready! Ask any legal question.');
+                    this.updateModelDownloadUI('ready');
                 } catch (error) {
                     console.warn('[LegalGuard] Could not create AI session:', error);
                     this.updateAPIStatus('unavailable', 'Failed to initialize AI');
+                    this.aiAvailable = false;
+                    this.updateModelDownloadUI('hidden');
+                    this.setPromptInputEnabled(false);
                     return;
                 }
             }
@@ -114,18 +187,23 @@ class LegalGuardSidePanel {
         } catch (error) {
             console.warn('[LegalGuard] AI initialization failed:', error);
             this.updateAPIStatus('unavailable', 'AI initialization failed');
+            this.aiAvailable = false;
+            this.updateModelDownloadUI('hidden');
+            this.setPromptInputEnabled(false);
         }
     }
 
     async ensureAISession() {
         // If session already exists, return
         if (this.aiSession && this.aiAvailable) {
+            this.updateModelDownloadUI('ready');
             return true;
         }
 
         // Check if LanguageModel is available
         if (typeof LanguageModel === 'undefined') {
             this.updateAPIStatus('unavailable', 'AI not available in this browser');
+            this.updateModelDownloadUI('hidden');
             return false;
         }
 
@@ -136,33 +214,62 @@ class LegalGuardSidePanel {
 
             if (availability === 'unavailable') {
                 this.updateAPIStatus('unavailable', 'AI not available on this device');
+                this.updateModelDownloadUI('hidden');
                 return false;
             }
 
             // Now we have a user gesture, safe to create session and download if needed
             if (availability === 'downloadable' || availability === 'downloading') {
                 this.updateAPIStatus('downloading', 'Downloading AI model...');
+                this.updateModelDownloadUI('downloading', 'Downloading Chrome AI model (first-time setup)...<br>Please wait a few minutes.');
                 
                 try {
+                    const self = this;
                     this.aiSession = await LanguageModel.create({
                         monitor(m) {
                             m.addEventListener('downloadprogress', (e) => {
-                                const percent = Math.round((e.loaded / e.total) * 100);
-                                console.log(`[LegalGuard] Downloaded ${percent}%`);
+                                const ratio = typeof e.loaded === 'number' ? e.loaded : null;
+                                const percent = ratio !== null ? Math.round(ratio * 100) : null;
+                                console.log(`[LegalGuard] Downloaded ${percent ?? '?'}%`);
                                 // Update status with progress
                                 const statusElement = document.getElementById('apiStatus');
                                 if (statusElement) {
-                                    statusElement.textContent = `Downloading AI model... ${percent}%`;
+                                    statusElement.textContent = percent !== null
+                                        ? `Downloading AI model... ${percent}%`
+                                        : 'Downloading AI model...';
                                 }
+                                const overlayMessage = self?.elements?.modelOverlayMessage;
+                                if (overlayMessage) {
+                                    overlayMessage.innerHTML = percent !== null
+                                        ? `Downloading Chrome AI model (first-time setup)...<br>${percent}% complete`
+                                        : 'Downloading Chrome AI model (first-time setup)...<br>Please wait a few minutes.';
+                                }
+                                if (percent !== null) {
+                                    self.updateModelDownloadUI('downloading', `Downloading Chrome AI model (first-time setup)...<br>${percent}% complete`);
+                                }
+                            });
+                            m.addEventListener('downloadcompleted', () => {
+                                self.updateModelDownloadUI('preparing', 'Almost there... getting LegalGuard ready.');
+                            });
+                            m.addEventListener('downloadfailed', () => {
+                                self.updateModelDownloadUI('hidden', 'Failed to download Chrome AI model. Please try again.');
+                                const statusElement = document.getElementById('apiStatus');
+                                if (statusElement) {
+                                    statusElement.textContent = 'Failed to download AI model. Try again.';
+                                }
+                                self.setPromptInputEnabled(true);
                             });
                         },
                     });
                     this.aiAvailable = true;
                     this.updateAPIStatus('available', 'AI ready! Ask any legal question.');
+                    this.updateModelDownloadUI('ready');
                     return true;
                 } catch (error) {
                     console.warn('[LegalGuard] Could not create AI session:', error);
                     this.updateAPIStatus('unavailable', `Failed to initialize AI: ${error.message}`);
+                    this.updateModelDownloadUI('hidden', 'Failed to download Chrome AI model. Please try again.');
+                    this.setPromptInputEnabled(true);
                     return false;
                 }
             } else if (availability === 'available') {
@@ -170,10 +277,13 @@ class LegalGuardSidePanel {
                     this.aiSession = await LanguageModel.create();
                     this.aiAvailable = true;
                     this.updateAPIStatus('available', 'AI ready! Ask any legal question.');
+                    this.updateModelDownloadUI('ready');
                     return true;
                 } catch (error) {
                     console.warn('[LegalGuard] Could not create AI session:', error);
                     this.updateAPIStatus('unavailable', `Failed to initialize AI: ${error.message}`);
+                    this.updateModelDownloadUI('hidden', `Failed to initialize AI: ${error.message}`);
+                    this.setPromptInputEnabled(true);
                     return false;
                 }
             }
@@ -182,6 +292,8 @@ class LegalGuardSidePanel {
         } catch (error) {
             console.warn('[LegalGuard] Failed to ensure AI session:', error);
             this.updateAPIStatus('unavailable', `AI initialization failed: ${error.message}`);
+            this.updateModelDownloadUI('hidden', `AI initialization failed: ${error.message}`);
+            this.setPromptInputEnabled(true);
             return false;
         }
     }
@@ -491,6 +603,7 @@ Current page context:`;
             
             // Sanitize HTML locally (replacing DOMPurify)
             html = this.sanitizeHTML(html);
+            html = this.transformClauseMarkdown(html);
             
             return html;
         } catch (error) {
@@ -524,6 +637,153 @@ Current page context:`;
         });
         
         return tempDiv.innerHTML;
+    }
+
+    escapeHTML(text = '') {
+        return text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    normalizeText(text = '') {
+        return (text || '').replace(/\s+/g, ' ').trim();
+    }
+
+    truncateTextByChars(text = '') {
+        return this.normalizeText(text);
+    }
+
+    truncateWords(text = '') {
+        return this.normalizeText(text);
+    }
+
+    stripLabel(text = '') {
+        const normalized = this.normalizeText(text);
+        const colonIndex = normalized.indexOf(':');
+        if (colonIndex === -1) return normalized;
+        return normalized.slice(colonIndex + 1).trim();
+    }
+
+    buildClauseCardHTML({ title, summary, details, keyPoints }) {
+        let html = '<div class="lg-clause-card p-3 mb-2 rounded-xl border border-gray-100 shadow-sm bg-white">';
+
+        if (title) {
+            html += `<h3 class="text-sm font-semibold text-gray-800 mb-1 line-clamp-1">${this.escapeHTML(title)}</h3>`;
+        }
+
+        if (summary) {
+            html += `<p class="text-xs text-gray-600 mb-1"><span class="font-medium text-gray-700">💡 Summary:</span> ${this.escapeHTML(summary)}</p>`;
+        }
+
+        if (details) {
+            html += `<p class="text-xs text-gray-500 mb-1"><span class="font-medium text-gray-700">🔹 Detail:</span> ${this.escapeHTML(details)}</p>`;
+        }
+
+        if (keyPoints && keyPoints.length > 0) {
+            html += '<ul class="list-disc list-inside text-xs text-gray-500 space-y-0.5">';
+            keyPoints.forEach((point, index) => {
+                const display = this.escapeHTML(point);
+                html += `<li>⚠️ ${display}</li>`;
+            });
+            html += '</ul>';
+        }
+
+        html += '</div>';
+        return html;
+    }
+
+    transformClauseMarkdown(html) {
+        try {
+            if (!html || !html.includes('<h3')) {
+                return html;
+            }
+
+            const temp = document.createElement('div');
+            temp.innerHTML = html;
+            const headings = Array.from(temp.querySelectorAll('h3'));
+            if (!headings.length) {
+                return html;
+            }
+
+            const cards = [];
+            const summaryRegex = /(summary|resumen|résumé|zusammenfassung|riassunto|resumo|摘要|要約)/i;
+
+            headings.forEach((heading) => {
+                const cardData = {
+                    title: this.normalizeText(heading.textContent),
+                    summary: '',
+                    detailsSegments: [],
+                    keyPoints: []
+                };
+
+                let node = heading.nextElementSibling;
+                while (node) {
+                    const tag = node.tagName;
+                    if (tag === 'H3') break;
+
+                    if (!cardData.summary && tag === 'P') {
+                        const strong = node.querySelector('strong');
+                        const labelText = strong ? this.normalizeText(strong.textContent) : '';
+                        if (summaryRegex.test(labelText)) {
+                            cardData.summary = this.normalizeText(this.stripLabel(node.textContent));
+                        }
+                    }
+
+                    if (tag === 'H4') {
+                        const label = this.normalizeText(node.textContent).replace(/[:：]\s*$/, '');
+                        let detailContent = '';
+                        let detailNode = node.nextElementSibling;
+                        while (detailNode && !['H3', 'H4', 'UL'].includes(detailNode.tagName)) {
+                            if (detailNode.tagName === 'P') {
+                                detailContent = this.normalizeText(detailNode.textContent);
+                                break;
+                            }
+                            detailNode = detailNode.nextElementSibling;
+                        }
+
+                        if (detailContent) {
+                            const combined = `${label}: ${detailContent}`;
+                            cardData.detailsSegments.push(this.normalizeText(combined));
+                        }
+                    }
+
+                    if (tag === 'UL') {
+                        const bulletItems = Array.from(node.querySelectorAll('li')).map((li) =>
+                            this.normalizeText(li.textContent)
+                        );
+                        if (bulletItems.length) {
+                            cardData.keyPoints.push(...bulletItems);
+                        }
+                    }
+
+                    node = node.nextElementSibling;
+                }
+
+                const details = cardData.detailsSegments.join('; ');
+                const keyPoints = cardData.keyPoints.slice(0, 3);
+                const hasContent = cardData.title || cardData.summary || details || keyPoints.length;
+                if (hasContent) {
+                    cards.push(this.buildClauseCardHTML({
+                        title: cardData.title,
+                        summary: cardData.summary,
+                        details,
+                        keyPoints
+                    }));
+                }
+            });
+
+            if (!cards.length) {
+                return html;
+            }
+
+            return `<div class="lg-clause-stack">${cards.join('')}</div>`;
+        } catch (error) {
+            console.warn('[LegalGuard] Failed to transform clause markdown:', error);
+            return html;
+        }
     }
 
     countWords(text) {
@@ -764,10 +1024,8 @@ Current page context:`;
             });
             
             chatInput.addEventListener('input', () => {
-                const hasText = chatInput.value.trim().length > 0;
-                if (sendBtn) {
-                    sendBtn.disabled = !hasText || !this.aiAvailable;
-                }
+                this.hasInputText = chatInput.value.trim().length > 0;
+                this.syncPromptControls();
             });
         }
 
@@ -801,15 +1059,20 @@ Current page context:`;
             this.updateTranslationStatus('Auto-translate setting updated');
         });
 
-        // Mute toggle
-        document.getElementById('muteToggle')?.addEventListener('change', (e) => {
-            this.toggleMute(e.target.checked);
-        });
+        // Mute toggle button
+        const muteBtn = this.elements?.muteToggleBtn || document.getElementById('muteToggleBtn');
+        if (muteBtn) {
+            muteBtn.addEventListener('click', async () => {
+                const currentlyMuted = muteBtn.dataset.state === 'muted';
+                const newMuted = !currentlyMuted;
+                await this.toggleMute(newMuted);
+            });
+        }
     }
 
     async sendMessage() {
-        const chatInput = document.getElementById('chat-input');
-        if (!chatInput || this.isStreaming) return;
+        const chatInput = this.elements?.chatInput || document.getElementById('chat-input');
+        if (!chatInput || chatInput.disabled || this.isStreaming) return;
 
         const originalMessage = chatInput.value.trim();
         if (!originalMessage) return;
@@ -822,8 +1085,8 @@ Current page context:`;
 
         // Clear input
         chatInput.value = '';
-        const sendBtn = document.getElementById('send-btn');
-        if (sendBtn) sendBtn.disabled = true;
+        this.hasInputText = false;
+        this.syncPromptControls();
 
         // Detect language if auto-detect is enabled
         let sourceLanguage = this.userLanguage;
@@ -875,7 +1138,12 @@ Current page context:`;
         await this.saveConversationHistory();
 
         // Generate AI response using English message
-        await this.generateAIResponse(messageToSend, sourceLanguage, this.currentTone);
+        try {
+            await this.generateAIResponse(messageToSend, sourceLanguage, this.currentTone);
+        } finally {
+            this.isStreaming = false;
+            this.syncPromptControls();
+        }
     }
 
     async sendQuickAction(action) {
@@ -887,8 +1155,8 @@ Current page context:`;
             return;
         }
 
-        const chatInput = document.getElementById('chat-input');
-        const selectedText = chatInput.value.trim();
+        const chatInput = this.elements?.chatInput || document.getElementById('chat-input');
+        const selectedText = chatInput?.value?.trim() || '';
         
         // Set tone based on action
         this.currentTone = action === 'eli3' ? 'eli3' : 'normal';
@@ -908,7 +1176,11 @@ Current page context:`;
         }
 
         if (prompt) {
-            chatInput.value = '';
+            if (chatInput) {
+                chatInput.value = '';
+            }
+            this.hasInputText = false;
+            this.syncPromptControls();
             
             // Detect language and translate if needed
             let sourceLanguage = this.userLanguage;
@@ -961,6 +1233,7 @@ Current page context:`;
         if (!this.aiSession || this.isStreaming) return;
 
         this.isStreaming = true;
+        this.syncPromptControls();
         const assistantMessageElement = this.addMessage('assistant', '', true);
 
         try {
@@ -1024,8 +1297,7 @@ Current page context:`;
             assistantMessageElement.innerHTML = '<div class="structured-content"><p>Sorry, I encountered an error. Please try again.</p></div>';
         } finally {
             this.isStreaming = false;
-            const sendBtn = document.getElementById('send-btn');
-            if (sendBtn) sendBtn.disabled = false;
+            this.syncPromptControls();
         }
     }
 
@@ -1344,15 +1616,47 @@ Current page context:`;
     }
 
 	async generatePageSummaryWithAI() {
-		try {
-			const container = document.getElementById('summary-section');
-			if (!container) return;
+        try {
+            const container = document.getElementById('summary-section');
+            if (!container) return;
 
-			// Validate Summarizer API availability per Chrome docs
-			if (!('Summarizer' in self)) {
-				container.innerHTML = '<em style="color: #9ca3af;">Summary not available</em>';
-				return;
-			}
+            // Clear any pending retry to avoid duplicate timers
+            if (this.summaryRetryTimer) {
+                clearTimeout(this.summaryRetryTimer);
+                this.summaryRetryTimer = null;
+            }
+
+            // Validate Summarizer API availability per Chrome docs
+            if (!('Summarizer' in self) || typeof Summarizer.availability !== 'function') {
+                container.innerHTML = '<em style="color: #9ca3af;">Summary not available</em>';
+                return;
+            }
+
+            let summarizerAvailability = 'unavailable';
+            try {
+                summarizerAvailability = await Summarizer.availability();
+            } catch (availabilityError) {
+                console.warn('[LegalGuard] Summarizer availability check failed:', availabilityError);
+            }
+
+            if (summarizerAvailability === 'unavailable') {
+                container.innerHTML = '<em style="color: #9ca3af;">Summary not available on this device.</em>';
+                return;
+            }
+
+            if (summarizerAvailability === 'downloadable' || summarizerAvailability === 'downloading') {
+                container.innerHTML = '<em style="color: #475569;">Downloading Chrome AI model (first-time setup)... Summary will refresh automatically once ready.</em>';
+                // Re-check availability after a short delay
+                this.summaryRetryTimer = setTimeout(() => {
+                    this.generatePageSummaryWithAI().catch(() => {
+                        const retryContainer = document.getElementById('summary-section');
+                        if (retryContainer) {
+                            retryContainer.innerHTML = '<em style="color: #9ca3af;">Summary not available</em>';
+                        }
+                    });
+                }, 8000);
+                return;
+            }
 
 			// Retrieve page text from the content script
 			let pageText = '';
@@ -1566,10 +1870,7 @@ Current page context:`;
             const result = await chrome.storage.local.get([`lg:mute:${host}`]);
             const isMuted = result[`lg:mute:${host}`] === '1';
             
-            const muteToggle = document.getElementById('muteToggle');
-            if (muteToggle) {
-                muteToggle.checked = isMuted;
-            }
+            this.updateMuteButton(isMuted);
         } catch (error) {
             console.warn('[LegalGuard] Could not load mute state:', error);
         }
@@ -1591,9 +1892,13 @@ Current page context:`;
                 await chrome.storage.local.remove([key]);
             }
 
+            this.updateMuteButton(isMuted);
             console.log(`[LegalGuard] Mute ${isMuted ? 'enabled' : 'disabled'} for ${host}`);
+            return true;
         } catch (error) {
             console.warn('[LegalGuard] Could not toggle mute state:', error);
+            await this.loadMuteState();
+            return false;
         }
     }
 

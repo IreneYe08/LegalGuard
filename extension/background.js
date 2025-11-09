@@ -70,6 +70,44 @@ async function openSidePanelForTab(tabId) {
     }
 }
 
+async function getActiveTabId() {
+    if (!hasTabs) {
+        throw new Error('tabs API not available');
+    }
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id && tab?.id !== 0) {
+        throw new Error('No active tab found');
+    }
+    return tab.id;
+}
+
+async function openSidePanelFrom(sender) {
+    try {
+        const tabId = sender?.tab?.id ?? (await getActiveTabId());
+        await chrome.sidePanel.setOptions({
+            tabId,
+            path: 'sidepanel.html',
+            enabled: true
+        });
+        await chrome.sidePanel.open({ tabId });
+        console.log('[LG] Side panel opened from message for tab:', tabId);
+        return true;
+    } catch (e) {
+        console.error('[LG] Failed to open side panel:', e);
+        if (String(e?.message || e).toLowerCase().includes('user gesture')) {
+            try {
+                console.warn('[LG] Attempting fallback via action popup to preserve gesture chain');
+                await chrome.action.openPopup();
+            } catch (popupError) {
+                console.error('[LG] Fallback openPopup failed:', popupError);
+                throw popupError;
+            }
+        } else {
+            throw e;
+        }
+    }
+}
+
 async function getBestTabId(sender) {
     // Prefer sender tab ID
     const id = sender?.tab?.id;
@@ -163,7 +201,21 @@ if (hasCommands && chrome.commands.onCommand?.addListener) {
 // Message bridge from content scripts
 if (hasRuntime && chrome.runtime.onMessage?.addListener) {
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-        console.log('[LG] Message received:', request?.action, 'from tab:', sender?.tab?.id);
+        const messageType = request?.type || request?.action;
+        console.log('[LG] Message received:', messageType, 'from tab:', sender?.tab?.id);
+        
+        if (request?.type === 'OPEN_SIDE_PANEL') {
+            try {
+                const popupPromise = chrome.action?.openPopup?.();
+                if (popupPromise && typeof popupPromise.then === 'function') {
+                    popupPromise.catch((err) => console.error('[LG] openPopup failed:', err));
+                }
+            } catch (err) {
+                console.error('[LG] openPopup threw synchronously:', err);
+            }
+            sendResponse?.({ success: true });
+            return false;
+        }
         
         // Handle openSidePanel action - use the existing user gesture handlers
         if (request?.action === 'openSidePanel') {

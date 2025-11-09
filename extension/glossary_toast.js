@@ -381,6 +381,37 @@ if (
             });
         }
 
+        function isRuntimeAvailable() {
+            return typeof chrome !== 'undefined' &&
+                !!chrome.runtime?.id &&
+                typeof chrome.runtime.sendMessage === 'function';
+        }
+
+        function safeRuntimeSendMessage(message, callback) {
+            const label = message?.type || message?.action || 'unknown';
+
+            if (!isRuntimeAvailable()) {
+                console.warn(`[LegalGuard] Runtime unavailable for message ${label}; skipping send`);
+                if (typeof callback === 'function') {
+                    callback({ success: false, error: 'runtimeUnavailable' });
+                }
+                return;
+            }
+
+            try {
+                chrome.runtime.sendMessage(message, (...args) => {
+                    if (typeof callback === 'function') {
+                        callback(...args);
+                    }
+                });
+            } catch (error) {
+                console.warn(`[LegalGuard] Runtime message failed for ${label}:`, error);
+                if (typeof callback === 'function') {
+                    callback({ success: false, error: error?.message || String(error) });
+                }
+            }
+        }
+
         function showToast({ title, subtitle, allPatterns }) {
             console.log('[LegalGuard] showToast called with:', { title, subtitle });
             
@@ -495,12 +526,47 @@ if (
                 return 'Miscellaneous';
             }
 
+            const secondaryButton = el.querySelector('#lg-secondary');
+            if (secondaryButton && !secondaryButton.dataset.lgPointerbound) {
+                secondaryButton.dataset.lgPointerbound = 'true';
+                secondaryButton.addEventListener('pointerdown', () => {
+                    if (!isRuntimeAvailable()) {
+                        console.warn('[LegalGuard] Runtime unavailable during pointerdown; prompting user to use extension icon');
+                        const btn = el.querySelector('#lg-secondary');
+                        if (btn) {
+                            btn.textContent = '⚠️ Click extension icon for full analysis';
+                            btn.style.background = '#f59e0b';
+                            btn.style.color = 'white';
+                            btn.style.fontWeight = 'bold';
+                        }
+                        return;
+                    }
+
+                    safeRuntimeSendMessage({
+                        type: 'OPEN_SIDE_PANEL',
+                        source: 'toast'
+                    });
+                });
+            }
+
             // Update the button click handler to store the actual detection results
             el.querySelector('#lg-secondary').onclick = () => {
                 console.log('[LegalGuard] Opening side panel for full analysis');
-                
+
+                if (!isRuntimeAvailable()) {
+                    console.warn('[LegalGuard] Runtime unavailable; cannot open side panel from toast click');
+                    const btn = el.querySelector('#lg-secondary');
+                    if (btn) {
+                        btn.textContent = '⚠️ Click extension icon to view results';
+                        btn.style.background = '#f59e0b';
+                        btn.style.color = 'white';
+                        btn.style.fontWeight = 'bold';
+                    }
+                    return;
+                }
+
                 // First prep the side panel
-                chrome.runtime.sendMessage({ 
+                safeRuntimeSendMessage({ 
                     action: 'prepSidePanel'
                 }, (prepResponse) => {
                     if (prepResponse?.success) {
@@ -514,22 +580,6 @@ if (
                             btn.style.color = 'white';
                             btn.style.fontWeight = 'bold';
                         }
-                        
-                        // Show prominent instruction message
-                        const guide = document.createElement('div');
-                        guide.style.cssText = `
-                            position: fixed; top: 20px; right: 20px; z-index: 10000;
-                            background: #10b981; color: white; padding: 16px 20px;
-                            border-radius: 12px; font-size: 16px; max-width: 350px;
-                            box-shadow: 0 8px 25px rgba(16, 185, 129, 0.3);
-                            border: 2px solid #059669;
-                        `;
-                        guide.innerHTML = `
-                            <div style="font-weight: bold; margin-bottom: 8px;">🛡️ Side Panel Ready!</div>
-                            <div>Click the LegalGuard extension icon in your toolbar or press <strong>Alt+L</strong> to open the full analysis.</div>
-                        `;
-                        document.body.appendChild(guide);
-                        setTimeout(() => guide.remove(), 8000);
                         
                         // Send ACTUAL detection results to side panel
                         setTimeout(() => {
@@ -556,7 +606,7 @@ if (
                             
                             console.log('[LegalGuard] Sending analysis data to side panel:', analysisData);
                             
-                            chrome.runtime.sendMessage({
+                            safeRuntimeSendMessage({
                                 action: 'analysisComplete',
                                 data: analysisData
                             });
