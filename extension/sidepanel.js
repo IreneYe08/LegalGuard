@@ -6,6 +6,7 @@ class LegalGuardSidePanel {
         this.totalMatches = 0;
         this.aiSession = null;
         this.aiAvailable = false;
+        this.aiAvailabilityState = null; // Store availability state ('available', 'downloadable', 'downloading', 'unavailable')
         this.currentTabId = null;
         this.conversationHistory = [];
         this.isStreaming = false;
@@ -77,32 +78,28 @@ class LegalGuardSidePanel {
             // Check availability
             const availability = await LanguageModel.availability();
             console.log('[LegalGuard] AI availability:', availability);
+            this.aiAvailabilityState = availability;
+
+            // Enable send button (will create session on demand with user gesture)
+            const sendBtn = document.getElementById('send-btn');
+            if (sendBtn) {
+                // Only disable if completely unavailable, otherwise enable for on-demand creation
+                sendBtn.disabled = (availability === 'unavailable');
+            }
 
             if (availability === 'unavailable') {
                 this.updateAPIStatus('unavailable', 'AI not available on this device');
                 return;
             }
 
+            // Don't create session during initialization if model needs to be downloaded
+            // Chrome requires a user gesture to download models
             if (availability === 'downloadable' || availability === 'downloading') {
-                this.updateAPIStatus('downloading', 'Downloading AI model...');
-                
-                // Create session to trigger download with progress monitoring
-                try {
-                    this.aiSession = await LanguageModel.create({
-                        monitor(m) {
-                            m.addEventListener('downloadprogress', (e) => {
-                                console.log(`Downloaded ${e.loaded * 100}%`);
-                            });
-                        },
-                    });
-                    this.aiAvailable = true;
-                    this.updateAPIStatus('available', 'AI ready! Ask any legal question.');
-                } catch (error) {
-                    console.warn('[LegalGuard] Could not create AI session:', error);
-                    this.updateAPIStatus('unavailable', 'Failed to initialize AI');
-                    return;
-                }
+                this.updateAPIStatus('downloadable', 'Click "Ask" to download and enable AI (requires user gesture)');
+                // Don't create session here - wait for user gesture
+                return;
             } else if (availability === 'available') {
+                // Model is already available, safe to create session
                 try {
                     this.aiSession = await LanguageModel.create();
                     this.aiAvailable = true;
@@ -114,15 +111,78 @@ class LegalGuardSidePanel {
                 }
             }
 
-            // Enable send button
-            const sendBtn = document.getElementById('send-btn');
-            if (sendBtn) {
-                sendBtn.disabled = !this.aiAvailable;
-            }
-
         } catch (error) {
             console.warn('[LegalGuard] AI initialization failed:', error);
             this.updateAPIStatus('unavailable', 'AI initialization failed');
+        }
+    }
+
+    async ensureAISession() {
+        // If session already exists, return
+        if (this.aiSession && this.aiAvailable) {
+            return true;
+        }
+
+        // Check if LanguageModel is available
+        if (typeof LanguageModel === 'undefined') {
+            this.updateAPIStatus('unavailable', 'AI not available in this browser');
+            return false;
+        }
+
+        try {
+            // Re-check availability in case it changed
+            const availability = await LanguageModel.availability();
+            this.aiAvailabilityState = availability;
+
+            if (availability === 'unavailable') {
+                this.updateAPIStatus('unavailable', 'AI not available on this device');
+                return false;
+            }
+
+            // Now we have a user gesture, safe to create session and download if needed
+            if (availability === 'downloadable' || availability === 'downloading') {
+                this.updateAPIStatus('downloading', 'Downloading AI model...');
+                
+                try {
+                    this.aiSession = await LanguageModel.create({
+                        monitor(m) {
+                            m.addEventListener('downloadprogress', (e) => {
+                                const percent = Math.round((e.loaded / e.total) * 100);
+                                console.log(`[LegalGuard] Downloaded ${percent}%`);
+                                // Update status with progress
+                                const statusElement = document.getElementById('apiStatus');
+                                if (statusElement) {
+                                    statusElement.textContent = `Downloading AI model... ${percent}%`;
+                                }
+                            });
+                        },
+                    });
+                    this.aiAvailable = true;
+                    this.updateAPIStatus('available', 'AI ready! Ask any legal question.');
+                    return true;
+                } catch (error) {
+                    console.warn('[LegalGuard] Could not create AI session:', error);
+                    this.updateAPIStatus('unavailable', `Failed to initialize AI: ${error.message}`);
+                    return false;
+                }
+            } else if (availability === 'available') {
+                try {
+                    this.aiSession = await LanguageModel.create();
+                    this.aiAvailable = true;
+                    this.updateAPIStatus('available', 'AI ready! Ask any legal question.');
+                    return true;
+                } catch (error) {
+                    console.warn('[LegalGuard] Could not create AI session:', error);
+                    this.updateAPIStatus('unavailable', `Failed to initialize AI: ${error.message}`);
+                    return false;
+                }
+            }
+
+            return false;
+        } catch (error) {
+            console.warn('[LegalGuard] Failed to ensure AI session:', error);
+            this.updateAPIStatus('unavailable', `AI initialization failed: ${error.message}`);
+            return false;
         }
     }
 
@@ -749,10 +809,16 @@ Current page context:`;
 
     async sendMessage() {
         const chatInput = document.getElementById('chat-input');
-        if (!chatInput || !this.aiAvailable || this.isStreaming) return;
+        if (!chatInput || this.isStreaming) return;
 
         const originalMessage = chatInput.value.trim();
         if (!originalMessage) return;
+
+        // Ensure AI session is created (this will handle user gesture requirement)
+        const aiReady = await this.ensureAISession();
+        if (!aiReady || !this.aiAvailable) {
+            return;
+        }
 
         // Clear input
         chatInput.value = '';
@@ -813,7 +879,13 @@ Current page context:`;
     }
 
     async sendQuickAction(action) {
-        if (!this.aiAvailable || this.isStreaming) return;
+        if (this.isStreaming) return;
+
+        // Ensure AI session is created (this will handle user gesture requirement)
+        const aiReady = await this.ensureAISession();
+        if (!aiReady || !this.aiAvailable) {
+            return;
+        }
 
         const chatInput = document.getElementById('chat-input');
         const selectedText = chatInput.value.trim();
