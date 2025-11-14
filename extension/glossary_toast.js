@@ -429,7 +429,7 @@ if (
                         <div class="lg-toast-message">${subtitle}</div>
                         <div class="lg-toast-actions">
                             <button class="lg-btn lg-btn-primary" id="lg-primary">Highlight key risks</button>
-                            <button class="lg-btn lg-btn-ghost" id="lg-secondary">[Prepare for full analysis]</button>
+                            <button class="lg-btn lg-btn-ghost" id="lg-secondary">Prepare for full analysis</button>
                         </div>
                         <div class="lg-toast-hint" style="font-size: 12px; color: #666; margin-top: 8px; text-align: center;">
                             💡 Tip: You can also open it from the Chrome extension panel.
@@ -557,7 +557,7 @@ if (
                     console.warn('[LegalGuard] Runtime unavailable; cannot open side panel from toast click');
                     const btn = el.querySelector('#lg-secondary');
                     if (btn) {
-                        btn.textContent = '⚠️ Click extension icon to view results';
+                            btn.textContent = '⚠️ Alt+L to view results';
                         btn.style.background = '#f59e0b';
                         btn.style.color = 'white';
                         btn.style.fontWeight = 'bold';
@@ -575,7 +575,7 @@ if (
                         // Update button to be more prominent
                         const btn = el.querySelector('#lg-secondary');
                         if (btn) {
-                            btn.textContent = '✅ Click extension icon to see full analysis';
+                            btn.textContent = '✅ Alt+L to see full analysis';
                             btn.style.background = '#10b981';
                             btn.style.color = 'white';
                             btn.style.fontWeight = 'bold';

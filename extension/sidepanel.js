@@ -15,6 +15,11 @@ class LegalGuardSidePanel {
         this.currentTabId = null;
         this.conversationHistory = [];
         this.isStreaming = false;
+        this.downloadRetryCount = 0;
+        this.maxDownloadRetries = 3;
+        this.downloadMonitor = null;
+        this.downloadTimeout = null;
+        this.stallCheckTimeout = null;
         
         // Translation state
         this.translatorAvailable = false;
@@ -193,6 +198,237 @@ class LegalGuardSidePanel {
         }
     }
 
+    clearDownloadTimeout() {
+        if (this.downloadTimeout) {
+            clearTimeout(this.downloadTimeout);
+            this.downloadTimeout = null;
+        }
+        if (this.stallCheckTimeout) {
+            clearTimeout(this.stallCheckTimeout);
+            this.stallCheckTimeout = null;
+        }
+    }
+
+    cleanupFailedDownload() {
+        this.clearDownloadTimeout();
+        // Clear session reference if download failed
+        if (!this.aiAvailable && this.aiSession) {
+            this.aiSession = null;
+        }
+        this.downloadMonitor = null;
+    }
+
+    getErrorMessage(error) {
+        const errorMsg = error?.message || String(error || 'Unknown error');
+        const lowerMsg = errorMsg.toLowerCase();
+        
+        // Provide specific guidance based on error type
+        if (lowerMsg.includes('network') || lowerMsg.includes('fetch') || lowerMsg.includes('connection')) {
+            return 'Network error: Check your internet connection and try again.';
+        } else if (lowerMsg.includes('disk') || lowerMsg.includes('space') || lowerMsg.includes('storage')) {
+            return 'Insufficient disk space: Free up storage space and try again.';
+        } else if (lowerMsg.includes('permission') || lowerMsg.includes('denied')) {
+            return 'Permission denied: Check Chrome settings and ensure AI features are enabled.';
+        } else if (lowerMsg.includes('timeout') || lowerMsg.includes('timed out')) {
+            return 'Download timeout: The download took too long. Please check your connection and try again.';
+        } else if (lowerMsg.includes('user gesture') || lowerMsg.includes('activation')) {
+            return 'User gesture required: Please click the Ask button again to start the download.';
+        } else {
+            return `Download failed: ${errorMsg}. Please try again.`;
+        }
+    }
+
+    async startModelDownload() {
+        // CRITICAL: Start the download IMMEDIATELY to preserve user gesture
+        // Do all async storage operations AFTER initiating LanguageModel.create()
+        
+        // Increment retry count synchronously (before any async ops)
+        const currentAttempt = this.downloadRetryCount + 1;
+        
+        // Quick synchronous check first (no async operations)
+        if (currentAttempt > this.maxDownloadRetries) {
+            // Need to check if we should reset - do this quickly but we'll check async
+            // For now, just continue and we'll handle it after starting download
+        }
+
+        this.downloadRetryCount = currentAttempt;
+        
+        // Save retry count asynchronously AFTER starting download (deferred)
+        setTimeout(() => {
+            chrome.storage.local.set({ 'lg:lastDownloadRetry': Date.now() }).catch(e => {
+                console.warn('[LegalGuard] Could not save retry time:', e);
+            });
+        }, 0);
+
+        // Check retry limit synchronously first (quick check)
+        if (currentAttempt > this.maxDownloadRetries) {
+            // Need to check storage - but we'll do it AFTER starting download
+            // For now, just warn but continue
+            console.warn(`[LegalGuard] Retry count ${currentAttempt} exceeds max ${this.maxDownloadRetries}, but starting download anyway to preserve user gesture`);
+        }
+        
+        const retryText = currentAttempt > 1 ? ` (Attempt ${currentAttempt}/${this.maxDownloadRetries})` : '';
+        this.updateAPIStatus('downloading', `Downloading AI model...${retryText}`);
+        this.updateModelDownloadUI('downloading', `Downloading Chrome AI model (first-time setup)...${retryText}<br>Please wait a few minutes. This may take 5-10 minutes depending on your connection.`);
+        
+        // Set overall timeout for the download (15 minutes)
+        // This will be cleared when download completes or fails
+        this.downloadTimeout = setTimeout(() => {
+            console.warn('[LegalGuard] Download timeout after 15 minutes');
+            this.cleanupFailedDownload();
+            this.handleDownloadError(new Error('Download timeout: The download took too long. Please check your connection and try again.'));
+        }, 15 * 60 * 1000); // 15 minutes
+        
+        let lastProgressTime = Date.now();
+
+        try {
+            const self = this;
+            let downloadPromiseResolve = null;
+            let downloadPromiseReject = null;
+            const downloadPromise = new Promise((resolve, reject) => {
+                downloadPromiseResolve = resolve;
+                downloadPromiseReject = reject;
+            });
+            
+            this.aiSession = await LanguageModel.create({
+                monitor(m) {
+                    self.downloadMonitor = m;
+                    
+                    // Track progress (download is active)
+                    m.addEventListener('downloadprogress', (e) => {
+                        lastProgressTime = Date.now();
+                        
+                        // Clear existing stall check timeout
+                        if (self.stallCheckTimeout) {
+                            clearTimeout(self.stallCheckTimeout);
+                            self.stallCheckTimeout = null;
+                        }
+                        
+                        const ratio = typeof e.loaded === 'number' ? e.loaded : null;
+                        const percent = ratio !== null ? Math.round(ratio * 100) : null;
+                        console.log(`[LegalGuard] Downloaded ${percent ?? '?'}%`);
+                        
+                        // Update status with progress
+                        const statusElement = document.getElementById('apiStatus');
+                        if (statusElement) {
+                            statusElement.textContent = percent !== null
+                                ? `Downloading AI model... ${percent}%${retryText}`
+                                : `Downloading AI model...${retryText}`;
+                        }
+                        const overlayMessage = self?.elements?.modelOverlayMessage;
+                        if (overlayMessage) {
+                            overlayMessage.innerHTML = percent !== null
+                                ? `Downloading Chrome AI model (first-time setup)...${retryText}<br>${percent}% complete`
+                                : `Downloading Chrome AI model (first-time setup)...${retryText}<br>Please wait a few minutes.`;
+                        }
+                        if (percent !== null) {
+                            self.updateModelDownloadUI('downloading', `Downloading Chrome AI model (first-time setup)...${retryText}<br>${percent}% complete`);
+                        }
+                        
+                        // Set up stall detection - if no progress for 2 minutes, consider it stalled
+                        self.stallCheckTimeout = setTimeout(() => {
+                            const timeSinceLastProgress = Date.now() - lastProgressTime;
+                            if (timeSinceLastProgress >= 2 * 60 * 1000) {
+                                console.warn('[LegalGuard] No download progress for 2 minutes - download may be stalled');
+                                self.cleanupFailedDownload();
+                                const error = new Error('Download stalled: No progress detected. Please check your connection and try again.');
+                                if (downloadPromiseReject) {
+                                    downloadPromiseReject(error);
+                                } else {
+                                    self.handleDownloadError(error);
+                                }
+                            }
+                        }, 2 * 60 * 1000); // Check after 2 minutes of no progress
+                    });
+                    
+                    m.addEventListener('downloadcompleted', () => {
+                        self.clearDownloadTimeout();
+                        self.downloadRetryCount = 0; // Reset on success
+                        chrome.storage.local.remove(['lg:lastDownloadRetry']);
+                        self.updateModelDownloadUI('preparing', 'Almost there... getting LegalGuard ready.');
+                        console.log('[LegalGuard] Download completed successfully');
+                        
+                        // Mark as available after a brief delay to ensure everything is ready
+                        setTimeout(() => {
+                            self.aiAvailable = true;
+                            self.updateAPIStatus('available', 'AI ready! Ask any legal question.');
+                            self.updateModelDownloadUI('ready');
+                            if (downloadPromiseResolve) {
+                                downloadPromiseResolve(true);
+                            }
+                        }, 500);
+                    });
+                    
+                    m.addEventListener('downloadfailed', (event) => {
+                        self.clearDownloadTimeout();
+                        const error = event?.error || new Error('Download failed');
+                        console.error('[LegalGuard] Download failed:', error);
+                        
+                        if (downloadPromiseReject) {
+                            downloadPromiseReject(error);
+                        } else {
+                            self.handleDownloadError(error);
+                        }
+                    });
+                },
+            });
+            
+            // If session was created successfully, wait for download to complete
+            // But if the model was already available, we can proceed immediately
+            if (this.aiSession) {
+                // Check if download is needed or if it's already available
+                const checkAvailability = await LanguageModel.availability();
+                if (checkAvailability === 'available') {
+                    // Model is already available, no download needed
+                    this.aiAvailable = true;
+                    this.downloadRetryCount = 0;
+                    chrome.storage.local.remove(['lg:lastDownloadRetry']);
+                    this.updateAPIStatus('available', 'AI ready! Ask any legal question.');
+                    this.updateModelDownloadUI('ready');
+                    return true;
+                } else {
+                    // Wait for download to complete (with timeout)
+                    try {
+                        await Promise.race([
+                            downloadPromise,
+                            new Promise((_, reject) => 
+                                setTimeout(() => reject(new Error('Download timeout')), 15 * 60 * 1000)
+                            )
+                        ]);
+                        return true;
+                    } catch (error) {
+                        return this.handleDownloadError(error);
+                    }
+                }
+            } else {
+                throw new Error('Failed to create AI session');
+            }
+        } catch (error) {
+            console.error('[LegalGuard] Could not create AI session:', error);
+            this.clearDownloadTimeout();
+            return this.handleDownloadError(error);
+        }
+    }
+
+    handleDownloadError(error) {
+        const errorMsg = this.getErrorMessage(error);
+        console.error('[LegalGuard] Download error:', errorMsg, error);
+        
+        this.cleanupFailedDownload();
+        
+        // If we have retries left, show retry message
+        if (this.downloadRetryCount < this.maxDownloadRetries) {
+            this.updateAPIStatus('unavailable', `${errorMsg} (Retrying automatically...)`);
+            this.updateModelDownloadUI('hidden', `${errorMsg}<br><br><strong>Tip:</strong> Ensure you have a stable internet connection and sufficient disk space. The download will retry automatically when you try again.`);
+        } else {
+            this.updateAPIStatus('unavailable', errorMsg);
+            this.updateModelDownloadUI('hidden', `${errorMsg}<br><br><strong>Troubleshooting tips:</strong><br>• Check your internet connection<br>• Ensure you have at least 500MB free disk space<br>• Try refreshing the page and clicking "Ask" again<br>• Check Chrome settings to ensure AI features are enabled<br>• Restart Chrome if the issue persists`);
+        }
+        
+        this.setPromptInputEnabled(true);
+        return false;
+    }
+
     async ensureAISession() {
         // If session already exists, return
         if (this.aiSession && this.aiAvailable) {
@@ -220,69 +456,23 @@ class LegalGuardSidePanel {
 
             // Now we have a user gesture, safe to create session and download if needed
             if (availability === 'downloadable' || availability === 'downloading') {
-                this.updateAPIStatus('downloading', 'Downloading AI model...');
-                this.updateModelDownloadUI('downloading', 'Downloading Chrome AI model (first-time setup)...<br>Please wait a few minutes.');
-                
-                try {
-                    const self = this;
-                    this.aiSession = await LanguageModel.create({
-                        monitor(m) {
-                            m.addEventListener('downloadprogress', (e) => {
-                                const ratio = typeof e.loaded === 'number' ? e.loaded : null;
-                                const percent = ratio !== null ? Math.round(ratio * 100) : null;
-                                console.log(`[LegalGuard] Downloaded ${percent ?? '?'}%`);
-                                // Update status with progress
-                                const statusElement = document.getElementById('apiStatus');
-                                if (statusElement) {
-                                    statusElement.textContent = percent !== null
-                                        ? `Downloading AI model... ${percent}%`
-                                        : 'Downloading AI model...';
-                                }
-                                const overlayMessage = self?.elements?.modelOverlayMessage;
-                                if (overlayMessage) {
-                                    overlayMessage.innerHTML = percent !== null
-                                        ? `Downloading Chrome AI model (first-time setup)...<br>${percent}% complete`
-                                        : 'Downloading Chrome AI model (first-time setup)...<br>Please wait a few minutes.';
-                                }
-                                if (percent !== null) {
-                                    self.updateModelDownloadUI('downloading', `Downloading Chrome AI model (first-time setup)...<br>${percent}% complete`);
-                                }
-                            });
-                            m.addEventListener('downloadcompleted', () => {
-                                self.updateModelDownloadUI('preparing', 'Almost there... getting LegalGuard ready.');
-                            });
-                            m.addEventListener('downloadfailed', () => {
-                                self.updateModelDownloadUI('hidden', 'Failed to download Chrome AI model. Please try again.');
-                                const statusElement = document.getElementById('apiStatus');
-                                if (statusElement) {
-                                    statusElement.textContent = 'Failed to download AI model. Try again.';
-                                }
-                                self.setPromptInputEnabled(true);
-                            });
-                        },
-                    });
-                    this.aiAvailable = true;
-                    this.updateAPIStatus('available', 'AI ready! Ask any legal question.');
-                    this.updateModelDownloadUI('ready');
-                    return true;
-                } catch (error) {
-                    console.warn('[LegalGuard] Could not create AI session:', error);
-                    this.updateAPIStatus('unavailable', `Failed to initialize AI: ${error.message}`);
-                    this.updateModelDownloadUI('hidden', 'Failed to download Chrome AI model. Please try again.');
-                    this.setPromptInputEnabled(true);
-                    return false;
-                }
+                return await this.startModelDownload();
             } else if (availability === 'available') {
                 try {
+                    // Reset retry count since model is available
+                    this.downloadRetryCount = 0;
+                    chrome.storage.local.remove(['lg:lastDownloadRetry']);
+                    
                     this.aiSession = await LanguageModel.create();
                     this.aiAvailable = true;
                     this.updateAPIStatus('available', 'AI ready! Ask any legal question.');
                     this.updateModelDownloadUI('ready');
                     return true;
                 } catch (error) {
-                    console.warn('[LegalGuard] Could not create AI session:', error);
-                    this.updateAPIStatus('unavailable', `Failed to initialize AI: ${error.message}`);
-                    this.updateModelDownloadUI('hidden', `Failed to initialize AI: ${error.message}`);
+                    console.error('[LegalGuard] Could not create AI session:', error);
+                    const errorMsg = this.getErrorMessage(error);
+                    this.updateAPIStatus('unavailable', errorMsg);
+                    this.updateModelDownloadUI('hidden', `Failed to initialize AI: ${errorMsg}`);
                     this.setPromptInputEnabled(true);
                     return false;
                 }
@@ -290,9 +480,11 @@ class LegalGuardSidePanel {
 
             return false;
         } catch (error) {
-            console.warn('[LegalGuard] Failed to ensure AI session:', error);
-            this.updateAPIStatus('unavailable', `AI initialization failed: ${error.message}`);
-            this.updateModelDownloadUI('hidden', `AI initialization failed: ${error.message}`);
+            console.error('[LegalGuard] Failed to ensure AI session:', error);
+            const errorMsg = this.getErrorMessage(error);
+            this.updateAPIStatus('unavailable', `AI initialization failed: ${errorMsg}`);
+            this.updateModelDownloadUI('hidden', `AI initialization failed: ${errorMsg}`);
+            this.cleanupFailedDownload();
             this.setPromptInputEnabled(true);
             return false;
         }
@@ -1077,9 +1269,18 @@ Current page context:`;
         const originalMessage = chatInput.value.trim();
         if (!originalMessage) return;
 
-        // Ensure AI session is created (this will handle user gesture requirement)
-        const aiReady = await this.ensureAISession();
-        if (!aiReady || !this.aiAvailable) {
+        // CRITICAL: Ensure AI session is created IMMEDIATELY after button click
+        // This preserves the user gesture for model download
+        // Don't do any async operations before this call
+        try {
+            const aiReady = await this.ensureAISession();
+            if (!aiReady || !this.aiAvailable) {
+                console.warn('[LegalGuard] AI session not ready, cannot send message');
+                return;
+            }
+        } catch (error) {
+            console.error('[LegalGuard] Failed to ensure AI session:', error);
+            this.updateAPIStatus('unavailable', `Failed to initialize AI: ${error.message}`);
             return;
         }
 
@@ -1149,9 +1350,17 @@ Current page context:`;
     async sendQuickAction(action) {
         if (this.isStreaming) return;
 
-        // Ensure AI session is created (this will handle user gesture requirement)
-        const aiReady = await this.ensureAISession();
-        if (!aiReady || !this.aiAvailable) {
+        // CRITICAL: Ensure AI session is created IMMEDIATELY after button click
+        // This preserves the user gesture for model download
+        try {
+            const aiReady = await this.ensureAISession();
+            if (!aiReady || !this.aiAvailable) {
+                console.warn('[LegalGuard] AI session not ready, cannot send quick action');
+                return;
+            }
+        } catch (error) {
+            console.error('[LegalGuard] Failed to ensure AI session:', error);
+            this.updateAPIStatus('unavailable', `Failed to initialize AI: ${error.message}`);
             return;
         }
 

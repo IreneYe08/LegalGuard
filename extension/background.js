@@ -185,17 +185,78 @@ if (hasContextMenus && chrome.contextMenus.onClicked?.addListener) {
 }
 
 // Commands keyboard shortcut — valid user gesture
-if (hasCommands && chrome.commands.onCommand?.addListener) {
-    chrome.commands.onCommand.addListener(async (command) => {
-        if (command !== 'lg-open-panel') return;
-        try {
-            console.log('[LG] Keyboard shortcut triggered');
-            const tabId = await getBestTabId({});
-            await openSidePanelForTab(tabId);
-        } catch (e) {
-            console.error('[LG] Command open failed:', e?.message || e);
+// CRITICAL: chrome.commands.onCommand provides a user gesture, but it expires quickly
+// We must minimize async operations before calling chrome.sidePanel.open()
+// According to Chrome docs, we can use windowId instead of tabId for better gesture preservation
+if (hasCommands && chrome.commands?.onCommand?.addListener) {
+    chrome.commands.onCommand.addListener((command) => {
+        if (command !== 'lg-open-panel') {
+            console.log('[LG] Ignoring command:', command);
+            return;
         }
+        
+        console.log('[LG] Keyboard shortcut Alt+L triggered (user gesture active)');
+        
+        // CRITICAL: Use windowId approach which is more gesture-friendly
+        // First try to get the current window ID (synchronous property access if possible)
+        chrome.windows.getCurrent((window) => {
+            if (window?.id) {
+                const windowId = window.id;
+                console.log('[LG] Got window ID:', windowId, 'opening side panel immediately');
+                
+                // Try opening with windowId first (more reliable for gestures)
+                // Since we have a default_path in manifest, we might not need setOptions
+                chrome.sidePanel.open({ windowId: windowId }).then(() => {
+                    console.log('[LG] Side panel opened successfully via Alt+L (windowId)');
+                }).catch((openError) => {
+                    console.warn('[LG] Opening with windowId failed, trying tabId approach:', openError);
+                    
+                    // Fallback: use tabId approach
+                    chrome.tabs.query({ active: true, windowId: windowId }, (tabs) => {
+                        if (tabs && tabs[0]?.id !== undefined && tabs[0].id >= 0) {
+                            const tabId = tabs[0].id;
+                            
+                            // Set options and open in quick succession
+                            chrome.sidePanel.setOptions({
+                                tabId: tabId,
+                                path: 'sidepanel.html',
+                                enabled: true
+                            }).then(() => {
+                                return chrome.sidePanel.open({ tabId: tabId });
+                            }).then(() => {
+                                console.log('[LG] Side panel opened successfully via Alt+L (tabId)');
+                            }).catch((tabError) => {
+                                console.error('[LG] Failed to open side panel with tabId:', tabError);
+                            });
+                        } else {
+                            console.error('[LG] Could not get active tab for window:', windowId);
+                        }
+                    });
+                });
+            } else {
+                console.error('[LG] Could not get current window ID');
+                // Last resort: try with active tab
+                chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                    if (tabs && tabs[0]?.id !== undefined && tabs[0].id >= 0) {
+                        chrome.sidePanel.setOptions({
+                            tabId: tabs[0].id,
+                            path: 'sidepanel.html',
+                            enabled: true
+                        }).then(() => {
+                            return chrome.sidePanel.open({ tabId: tabs[0].id });
+                        }).then(() => {
+                            console.log('[LG] Side panel opened via Alt+L (fallback)');
+                        }).catch((error) => {
+                            console.error('[LG] Fallback open failed:', error);
+                        });
+                    }
+                });
+            }
+        });
     });
+    console.log('[LG] Keyboard shortcut listener registered for Alt+L (using windowId for better gesture preservation)');
+} else {
+    console.warn('[LG] Commands API not available, keyboard shortcut will not work');
 }
 
 // Message bridge from content scripts
