@@ -78,6 +78,10 @@ class LegalGuardSidePanel {
             chatInput: document.getElementById('chat-input'),
             modelOverlay: document.getElementById('modelDownloadOverlay'),
             modelOverlayMessage: document.getElementById('modelDownloadMessage'),
+            modelDownloadProgress: document.getElementById('modelDownloadProgress'),
+            modelDownloadProgressContainer: document.getElementById('modelDownloadProgressContainer'),
+            modelDownloadProgressText: document.getElementById('modelDownloadProgressText'),
+            modelDownloadSpinner: document.getElementById('modelDownloadSpinner'),
             muteToggleBtn: document.getElementById('muteToggleBtn')
         };
     }
@@ -100,12 +104,69 @@ class LegalGuardSidePanel {
         this.syncPromptControls();
     }
 
-    updateModelDownloadUI(status, message) {
+    updateModelDownloadUI(status, message, progress = null) {
         this.modelStatus = status;
-        const { modelOverlay, modelOverlayMessage } = this.elements;
+        const { 
+            modelOverlay, 
+            modelOverlayMessage, 
+            modelDownloadProgress, 
+            modelDownloadProgressContainer,
+            modelDownloadProgressText,
+            modelDownloadSpinner
+        } = this.elements;
 
         if (modelOverlayMessage && typeof message === 'string') {
             modelOverlayMessage.innerHTML = message;
+        }
+
+        // Handle progress bar visibility and state
+        if (modelDownloadProgressContainer) {
+            if (status === 'downloading' && progress !== null) {
+                // Show progress bar with specific progress
+                modelDownloadProgressContainer.style.display = 'block';
+                if (modelDownloadProgress) {
+                    modelDownloadProgress.value = progress;
+                    // Ensure value attribute is set (not indeterminate)
+                    modelDownloadProgress.setAttribute('value', progress.toString());
+                }
+                if (modelDownloadProgressText) {
+                    const percent = Math.round(progress * 100);
+                    modelDownloadProgressText.textContent = `${percent}% complete`;
+                }
+                // Hide spinner when showing progress bar
+                if (modelDownloadSpinner) {
+                    modelDownloadSpinner.style.display = 'none';
+                }
+            } else if (status === 'preparing') {
+                // Show indeterminate progress (extracting/loading)
+                modelDownloadProgressContainer.style.display = 'block';
+                if (modelDownloadProgress) {
+                    // Remove value attribute to make progress bar indeterminate
+                    modelDownloadProgress.removeAttribute('value');
+                }
+                if (modelDownloadProgressText) {
+                    modelDownloadProgressText.textContent = 'Preparing model...';
+                }
+                // Show spinner for preparing state
+                if (modelDownloadSpinner) {
+                    modelDownloadSpinner.style.display = 'block';
+                }
+            } else {
+                // Hide progress bar
+                modelDownloadProgressContainer.style.display = 'none';
+                if (modelDownloadProgress) {
+                    modelDownloadProgress.value = 0;
+                    // Ensure value attribute exists (not indeterminate)
+                    modelDownloadProgress.setAttribute('value', '0');
+                }
+                if (modelDownloadProgressText) {
+                    modelDownloadProgressText.textContent = '';
+                }
+                // Show spinner for other downloading states
+                if (modelDownloadSpinner) {
+                    modelDownloadSpinner.style.display = status === 'downloading' ? 'block' : 'none';
+                }
+            }
         }
 
         if (modelOverlay) {
@@ -143,6 +204,15 @@ class LegalGuardSidePanel {
         }
     }
 
+    // Get consistent options for LanguageModel API
+    // CRITICAL: Always pass the same options to availability() and create()
+    getLanguageModelOptions() {
+        return {
+            expectedInputs: [{ type: 'text', languages: ['en'] }],
+            expectedOutputs: [{ type: 'text', languages: ['en'] }]
+        };
+    }
+
     async initializeAI() {
         try {
             // Check if LanguageModel is available
@@ -151,8 +221,11 @@ class LegalGuardSidePanel {
                 return;
             }
 
-            // Check availability
-            const availability = await LanguageModel.availability();
+            // CRITICAL: Use the same options for availability() and create()
+            const modelOptions = this.getLanguageModelOptions();
+            
+            // Check availability with the same options we'll use for create()
+            const availability = await LanguageModel.availability(modelOptions);
             console.log('[LegalGuard] AI availability:', availability);
             this.aiAvailabilityState = availability;
 
@@ -169,13 +242,14 @@ class LegalGuardSidePanel {
             if (availability === 'downloadable' || availability === 'downloading') {
                 this.updateAPIStatus('downloadable', 'Click "Ask" to download and enable AI (requires user gesture)');
                 this.aiAvailable = false;
-                this.updateModelDownloadUI('downloading', 'Downloading Chrome AI model (first-time setup)...<br>Please wait a few minutes.');
+                this.updateModelDownloadUI('downloading', 'AI model needs to be downloaded<br><br>Click the "Ask" button to start downloading. This is a one-time setup that may take 5-10 minutes depending on your internet connection.');
                 // Don't create session here - wait for user gesture
                 return;
             } else if (availability === 'available') {
                 // Model is already available, safe to create session
                 try {
-                    this.aiSession = await LanguageModel.create();
+                    // Use the same options as availability() check
+                    this.aiSession = await LanguageModel.create(modelOptions);
                     this.aiAvailable = true;
                     this.updateAPIStatus('available', 'AI ready! Ask any legal question.');
                     this.updateModelDownloadUI('ready');
@@ -269,7 +343,7 @@ class LegalGuardSidePanel {
         
         const retryText = currentAttempt > 1 ? ` (Attempt ${currentAttempt}/${this.maxDownloadRetries})` : '';
         this.updateAPIStatus('downloading', `Downloading AI model...${retryText}`);
-        this.updateModelDownloadUI('downloading', `Downloading Chrome AI model (first-time setup)...${retryText}<br>Please wait a few minutes. This may take 5-10 minutes depending on your connection.`);
+        this.updateModelDownloadUI('downloading', `Downloading Chrome AI model (first-time setup)...${retryText}<br>Please wait a few minutes. This may take 5-10 minutes depending on your connection.`, 0);
         
         // Set overall timeout for the download (15 minutes)
         // This will be cleared when download completes or fails
@@ -280,8 +354,12 @@ class LegalGuardSidePanel {
         }, 15 * 60 * 1000); // 15 minutes
         
         let lastProgressTime = Date.now();
+        let modelNewlyDownloaded = false;
 
         try {
+            // CRITICAL: Use the same options for create() as we use for availability()
+            const modelOptions = this.getLanguageModelOptions();
+            
             const self = this;
             let downloadPromiseResolve = null;
             let downloadPromiseReject = null;
@@ -291,6 +369,7 @@ class LegalGuardSidePanel {
             });
             
             this.aiSession = await LanguageModel.create({
+                ...modelOptions,
                 monitor(m) {
                     self.downloadMonitor = m;
                     
@@ -315,14 +394,24 @@ class LegalGuardSidePanel {
                                 ? `Downloading AI model... ${percent}%${retryText}`
                                 : `Downloading AI model...${retryText}`;
                         }
-                        const overlayMessage = self?.elements?.modelOverlayMessage;
-                        if (overlayMessage) {
-                            overlayMessage.innerHTML = percent !== null
-                                ? `Downloading Chrome AI model (first-time setup)...${retryText}<br>${percent}% complete`
-                                : `Downloading Chrome AI model (first-time setup)...${retryText}<br>Please wait a few minutes.`;
-                        }
-                        if (percent !== null) {
-                            self.updateModelDownloadUI('downloading', `Downloading Chrome AI model (first-time setup)...${retryText}<br>${percent}% complete`);
+                        
+                        // Update UI with progress bar
+                        if (ratio !== null) {
+                            // Show progress bar with specific progress
+                            self.updateModelDownloadUI(
+                                'downloading', 
+                                `Downloading Chrome AI model (first-time setup)...${retryText}`,
+                                ratio
+                            );
+                            modelNewlyDownloaded = true;
+                            
+                            // When download reaches 100%, show indeterminate state for extraction/loading
+                            if (ratio === 1) {
+                                self.updateModelDownloadUI('preparing', 'Download complete. Preparing model...');
+                            }
+                        } else {
+                            // No progress info available, show generic message
+                            self.updateModelDownloadUI('downloading', `Downloading Chrome AI model (first-time setup)...${retryText}<br>Please wait a few minutes.`);
                         }
                         
                         // Set up stall detection - if no progress for 2 minutes, consider it stalled
@@ -345,7 +434,13 @@ class LegalGuardSidePanel {
                         self.clearDownloadTimeout();
                         self.downloadRetryCount = 0; // Reset on success
                         chrome.storage.local.remove(['lg:lastDownloadRetry']);
-                        self.updateModelDownloadUI('preparing', 'Almost there... getting LegalGuard ready.');
+                        
+                        // Show indeterminate progress state (model is being extracted and loaded)
+                        if (modelNewlyDownloaded) {
+                            self.updateModelDownloadUI('preparing', 'Download complete. Preparing model...');
+                        } else {
+                            self.updateModelDownloadUI('preparing', 'Almost there... getting LegalGuard ready.');
+                        }
                         console.log('[LegalGuard] Download completed successfully');
                         
                         // Mark as available after a brief delay to ensure everything is ready
@@ -377,7 +472,9 @@ class LegalGuardSidePanel {
             // But if the model was already available, we can proceed immediately
             if (this.aiSession) {
                 // Check if download is needed or if it's already available
-                const checkAvailability = await LanguageModel.availability();
+                // CRITICAL: Use the same options as create()
+                const modelOptions = this.getLanguageModelOptions();
+                const checkAvailability = await LanguageModel.availability(modelOptions);
                 if (checkAvailability === 'available') {
                     // Model is already available, no download needed
                     this.aiAvailable = true;
@@ -419,10 +516,10 @@ class LegalGuardSidePanel {
         // If we have retries left, show retry message
         if (this.downloadRetryCount < this.maxDownloadRetries) {
             this.updateAPIStatus('unavailable', `${errorMsg} (Retrying automatically...)`);
-            this.updateModelDownloadUI('hidden', `${errorMsg}<br><br><strong>Tip:</strong> Ensure you have a stable internet connection and sufficient disk space. The download will retry automatically when you try again.`);
+            this.updateModelDownloadUI('hidden', `${errorMsg}<br><br><strong>What you can do:</strong><br>• Ensure you have a stable internet connection<br>• Free up at least 500MB of disk space<br>• The download will retry automatically when you click "Ask" again<br>• Keep this window open during the download`);
         } else {
             this.updateAPIStatus('unavailable', errorMsg);
-            this.updateModelDownloadUI('hidden', `${errorMsg}<br><br><strong>Troubleshooting tips:</strong><br>• Check your internet connection<br>• Ensure you have at least 500MB free disk space<br>• Try refreshing the page and clicking "Ask" again<br>• Check Chrome settings to ensure AI features are enabled<br>• Restart Chrome if the issue persists`);
+            this.updateModelDownloadUI('hidden', `${errorMsg}<br><br><strong>Troubleshooting steps:</strong><br>1. Check your internet connection is stable<br>2. Ensure you have at least 500MB free disk space<br>3. Check Chrome settings → Privacy and security → AI features are enabled<br>4. Try refreshing this page and clicking "Ask" again<br>5. If the issue persists, restart Chrome<br><br><strong>Note:</strong> Model downloads can take 5-10 minutes. Please keep this window open during the download.`);
         }
         
         this.setPromptInputEnabled(true);
@@ -444,8 +541,11 @@ class LegalGuardSidePanel {
         }
 
         try {
+            // CRITICAL: Use the same options for availability() and create()
+            const modelOptions = this.getLanguageModelOptions();
+            
             // Re-check availability in case it changed
-            const availability = await LanguageModel.availability();
+            const availability = await LanguageModel.availability(modelOptions);
             this.aiAvailabilityState = availability;
 
             if (availability === 'unavailable') {
@@ -463,7 +563,8 @@ class LegalGuardSidePanel {
                     this.downloadRetryCount = 0;
                     chrome.storage.local.remove(['lg:lastDownloadRetry']);
                     
-                    this.aiSession = await LanguageModel.create();
+                    // Use the same options as availability() check
+                    this.aiSession = await LanguageModel.create(modelOptions);
                     this.aiAvailable = true;
                     this.updateAPIStatus('available', 'AI ready! Ask any legal question.');
                     this.updateModelDownloadUI('ready');
@@ -1754,13 +1855,14 @@ Current page context:`;
                         this.showEmptyState('No legal terms detected on this page');
                     }
                 } catch (error) {
-                    console.warn('[LegalGuard] Could not get highlighted terms:', error);
-                    
-                    // Check if it's a connection error (content script not loaded)
-                    if (error.message && error.message.includes('Could not establish connection')) {
-                        console.log('[LegalGuard] Content script not loaded on this page');
+                    // Connection errors are expected if content script isn't loaded yet or page doesn't support it
+                    // This is not a critical error, so we'll handle it gracefully
+                    if (error?.message?.includes('Receiving end does not exist') || 
+                        error?.message?.includes('Could not establish connection')) {
+                        console.log('[LegalGuard] Content script not available for highlighted terms (this is normal for some pages)');
                         this.showEmptyState('Content script not loaded - try refreshing the page');
                     } else {
+                        console.warn('[LegalGuard] Could not get highlighted terms:', error);
                         // Other errors - just show empty state
                         this.showEmptyState('No legal terms detected on this page');
                     }
@@ -1822,7 +1924,385 @@ Current page context:`;
 				container.innerHTML = '<em style="color: #9ca3af;">Summary not available</em>';
 			}
 		});
-    }
+	}
+
+	/**
+	 * Recursive Character Text Splitter
+	 * Splits text into chunks while avoiding splitting in the middle of words or sentences
+	 * Based on LangChain.js RecursiveCharacterTextSplitter approach
+	 */
+	recursiveTextSplitter(text, chunkSize = 3000, chunkOverlap = 200) {
+		if (!text || text.length <= chunkSize) {
+			return [text];
+		}
+
+		const chunks = [];
+		let start = 0;
+
+		while (start < text.length) {
+			let end = Math.min(start + chunkSize, text.length);
+			
+			// If not at the end, try to find a good split point
+			if (end < text.length) {
+				// Try to split at paragraph break first
+				const paragraphBreak = text.lastIndexOf('\n\n', end);
+				if (paragraphBreak > start) {
+					end = paragraphBreak + 2;
+				} else {
+					// Try to split at sentence end
+					const sentenceEnd = Math.max(
+						text.lastIndexOf('. ', end),
+						text.lastIndexOf('.\n', end),
+						text.lastIndexOf('! ', end),
+						text.lastIndexOf('? ', end)
+					);
+					if (sentenceEnd > start) {
+						end = sentenceEnd + 2;
+					} else {
+						// Try to split at word boundary
+						const wordBreak = text.lastIndexOf(' ', end);
+						if (wordBreak > start) {
+							end = wordBreak + 1;
+						}
+					}
+				}
+			}
+
+			const chunk = text.slice(start, end).trim();
+			if (chunk) {
+				chunks.push(chunk);
+			}
+
+			// Move start position with overlap
+			start = Math.max(start + 1, end - chunkOverlap);
+		}
+
+		return chunks;
+	}
+
+	/**
+	 * Determine available token capacity for summarization
+	 * Uses measureInputUsage() and inputQuota to check token availability
+	 * Reference: https://developer.chrome.com/docs/ai/scale-summarization
+	 */
+	async getAvailableTokenCapacity(summarizer) {
+		try {
+			if (summarizer && typeof summarizer.measureInputUsage === 'function') {
+				// Measure an empty string to get baseline token usage
+				const measurement = await summarizer.measureInputUsage('');
+				const quota = summarizer.inputQuota;
+				if (quota !== undefined && measurement && measurement.inputTokens !== undefined) {
+					// Available tokens = total quota - baseline usage
+					const available = quota - measurement.inputTokens;
+					console.log(`[LegalGuard] Token capacity: ${available} available out of ${quota} total`);
+					return available;
+				}
+			}
+		} catch (e) {
+			console.warn('[LegalGuard] Could not measure token capacity:', e);
+		}
+		// Fallback: assume ~750 tokens per 3000 characters (4 chars per token average)
+		// This is a conservative estimate for client-side models
+		return null;
+	}
+
+	/**
+	 * Filter out boilerplate and navigation text
+	 * Removes common non-content elements to reduce text size
+	 */
+	filterBoilerplate(text) {
+		if (!text) return '';
+		
+		// Remove excessive whitespace
+		let cleaned = text.replace(/\s+/g, ' ').trim();
+		
+		// Remove common boilerplate patterns
+		const boilerplatePatterns = [
+			/cookie\s+policy/gi,
+			/privacy\s+policy/gi,
+			/terms\s+of\s+service/gi,
+			/click\s+here/gi,
+			/read\s+more/gi,
+			/continue\s+reading/gi,
+			/subscribe\s+to\s+our\s+newsletter/gi,
+			/follow\s+us\s+on/gi,
+			/share\s+this/gi,
+			/\b(copyright|©|®|™)\s+\d{4}/gi,
+			/all\s+rights\s+reserved/gi
+		];
+		
+		// Remove lines that are mostly boilerplate
+		const lines = cleaned.split(/[.!?]\s+/);
+		const filteredLines = lines.filter(line => {
+			const trimmed = line.trim();
+			if (trimmed.length < 20) return false; // Too short
+			if (boilerplatePatterns.some(pattern => pattern.test(trimmed))) return false;
+			return true;
+		});
+		
+		return filteredLines.join('. ').substring(0, 50000); // Limit to reasonable size
+	}
+
+	/**
+	 * Intelligently truncate text to extract most important parts
+	 * Takes intro, middle key paragraphs, and conclusion
+	 */
+	intelligentlyTruncate(text, maxChars = 8000) {
+		if (!text || text.length <= maxChars) {
+			return text;
+		}
+
+		// Clean and normalize
+		const cleaned = text.replace(/\s+/g, ' ').trim();
+		
+		// Split into paragraphs
+		const paragraphs = cleaned.split(/\n\s*\n|\.\s+(?=[A-Z])/).filter(p => p.trim().length > 50);
+		
+		if (paragraphs.length === 0) {
+			// Fallback: just take first part
+			return cleaned.substring(0, maxChars);
+		}
+
+		// Strategy: Take first 30%, middle 40%, last 30% of paragraphs
+		const introCount = Math.max(1, Math.floor(paragraphs.length * 0.3));
+		const middleCount = Math.max(1, Math.floor(paragraphs.length * 0.4));
+		const outroCount = Math.max(1, Math.floor(paragraphs.length * 0.3));
+
+		const selected = [
+			...paragraphs.slice(0, introCount), // Introduction
+			...paragraphs.slice(Math.floor(paragraphs.length / 2) - Math.floor(middleCount / 2), 
+			                    Math.floor(paragraphs.length / 2) + Math.ceil(middleCount / 2)), // Middle
+			...paragraphs.slice(-outroCount) // Conclusion
+		];
+
+		// Remove duplicates and join
+		const unique = [...new Set(selected)];
+		let result = unique.join('. ');
+
+		// If still too long, trim to fit
+		if (result.length > maxChars) {
+			result = result.substring(0, maxChars);
+			// Try to end at a sentence boundary
+			const lastPeriod = result.lastIndexOf('.');
+			if (lastPeriod > maxChars * 0.9) {
+				result = result.substring(0, lastPeriod + 1);
+			}
+		}
+
+		return result + (cleaned.length > result.length ? '...' : '');
+	}
+
+	/**
+	 * Generate a simple text-based summary fallback
+	 * Extracts key sentences and creates a basic summary when API is unavailable
+	 */
+	generateFallbackSummary(text, maxLength = 500) {
+		if (!text || text.length < 100) {
+			return 'Summary not available - content too short.';
+		}
+
+		// Remove excessive whitespace
+		const cleaned = text.replace(/\s+/g, ' ').trim();
+		
+		// Try to extract first few sentences
+		const sentences = cleaned.match(/[^.!?]+[.!?]+/g) || [];
+		
+		if (sentences.length === 0) {
+			// Fallback to first N characters
+			return cleaned.substring(0, maxLength) + (cleaned.length > maxLength ? '...' : '');
+		}
+
+		// Take first 3-5 sentences that fit within maxLength
+		let summary = '';
+		for (let i = 0; i < Math.min(sentences.length, 5); i++) {
+			const candidate = summary + (summary ? ' ' : '') + sentences[i].trim();
+			if (candidate.length <= maxLength) {
+				summary = candidate;
+			} else {
+				break;
+			}
+		}
+
+		if (!summary) {
+			// If no sentences fit, just take first part
+			summary = cleaned.substring(0, maxLength);
+		}
+
+		return summary.trim() + (cleaned.length > summary.length ? '...' : '');
+	}
+
+	/**
+	 * Summary of Summaries technique with timeout and progress tracking
+	 * Splits large text into chunks, summarizes each, then summarizes the concatenated summaries
+	 * Supports recursive summarization for very long content
+	 */
+	async summarizeWithChunking(text, summarizer, options = {}) {
+		const {
+			chunkSize = 3000,
+			chunkOverlap = 200,
+			maxRecursionDepth = 3, // Reduced from 5 to 3 for faster processing
+			recursionDepth = 0,
+			onProgress = null // Callback for progress updates
+		} = options;
+
+		// Check if text fits in one go
+		const estimatedTokens = Math.ceil(text.length / 4); // ~4 chars per token
+		
+		// Try to get actual token capacity
+		let availableTokens = await this.getAvailableTokenCapacity(summarizer);
+		if (availableTokens === null) {
+			// Fallback: use estimated chunk size
+			availableTokens = Math.floor(chunkSize / 4);
+		}
+
+		// If text is small enough, summarize directly
+		if (estimatedTokens <= availableTokens * 0.8) { // Use 80% of capacity for safety
+			try {
+				const summary = await summarizer.summarize(text, {
+					context: options.context || 'Remove boilerplate and navigation text. Focus on substantive content.'
+				});
+				return summary || '';
+			} catch (e) {
+				console.warn('[LegalGuard] Direct summarization failed, trying chunking:', e);
+				// Fall if direct summarization fails, continue with chunking
+			}
+		}
+
+		// Text is too long, split and summarize chunks
+		if (recursionDepth >= maxRecursionDepth) {
+			console.warn('[LegalGuard] Max recursion depth reached');
+			throw new Error('Content too long to summarize');
+		}
+
+		const chunks = this.recursiveTextSplitter(text, chunkSize, chunkOverlap);
+		console.log(`[LegalGuard] Split text into ${chunks.length} chunks for summarization`);
+
+		// Limit chunks to prevent excessive processing time
+		// Process max 10 chunks to stay within 2-minute limit
+		const maxChunks = 10;
+		const chunksToProcess = chunks.slice(0, maxChunks);
+		if (chunks.length > maxChunks) {
+			console.warn(`[LegalGuard] Limiting to first ${maxChunks} chunks out of ${chunks.length} to stay within time limit`);
+		}
+
+		// Summarize each chunk with progress tracking
+		const chunkSummaries = [];
+		for (let i = 0; i < chunksToProcess.length; i++) {
+			if (onProgress) {
+				onProgress(`Processing chunk ${i + 1}/${chunksToProcess.length}...`);
+			}
+			try {
+				const chunkSummary = await summarizer.summarize(chunksToProcess[i], {
+					context: options.context || 'Remove boilerplate and navigation text. Focus on substantive content.'
+				});
+				if (chunkSummary && chunkSummary.trim()) {
+					chunkSummaries.push(chunkSummary.trim());
+				}
+			} catch (e) {
+				console.warn(`[LegalGuard] Failed to summarize chunk ${i + 1}/${chunksToProcess.length}:`, e);
+				// Continue with other chunks even if one fails
+			}
+		}
+
+		if (chunkSummaries.length === 0) {
+			throw new Error('Failed to generate any chunk summaries');
+		}
+
+		// Concatenate summaries with newlines
+		const concatenatedSummaries = chunkSummaries.join('\n\n');
+
+		// Check if concatenated summaries need recursive summarization
+		const concatenatedTokens = Math.ceil(concatenatedSummaries.length / 4);
+		if (concatenatedTokens > availableTokens * 0.8) {
+			// Recursively summarize the summaries
+			console.log(`[LegalGuard] Recursively summarizing ${chunkSummaries.length} summaries (depth ${recursionDepth + 1})`);
+			return await this.summarizeWithChunking(
+				concatenatedSummaries,
+				summarizer,
+				{
+					...options,
+					recursionDepth: recursionDepth + 1
+				}
+			);
+		} else {
+			// Summarize the concatenated summaries
+			if (onProgress) {
+				onProgress('Combining summaries...');
+			}
+			try {
+				const finalSummary = await summarizer.summarize(concatenatedSummaries, {
+					context: 'This is a collection of summaries. Create a cohesive, comprehensive summary that combines all the key points.'
+				});
+				return finalSummary || concatenatedSummaries;
+			} catch (e) {
+				console.warn('[LegalGuard] Failed to summarize concatenated summaries, returning as-is:', e);
+				// Return concatenated summaries if final summarization fails
+				return concatenatedSummaries;
+			}
+		}
+	}
+
+	/**
+	 * Fast summarization strategy: Try direct first, then intelligent truncation
+	 * Much faster and more reliable than chunking
+	 */
+	async summarizeFast(text, summarizer, options = {}) {
+		const TIMEOUT_MS = 30 * 1000; // 30 seconds (much faster!)
+		const container = options.container || null;
+		const context = options.context || 'Remove boilerplate and navigation text. Focus on substantive content.';
+
+		// Step 1: Filter boilerplate to reduce size
+		let processedText = this.filterBoilerplate(text);
+		
+		// Step 2: Try direct summarization first (fastest)
+		if (container) {
+			container.innerHTML = '<em style="color: #64748b;">Generating summary...</em>';
+		}
+
+		try {
+			const directPromise = summarizer.summarize(processedText, { context });
+			const timeoutPromise = new Promise((_, reject) => {
+				setTimeout(() => reject(new Error('Timeout')), TIMEOUT_MS);
+			});
+
+			const summary = await Promise.race([directPromise, timeoutPromise]);
+			if (summary && summary.trim()) {
+				return summary.trim();
+			}
+		} catch (error) {
+			// Direct summarization failed - likely content too long
+			console.log('[LegalGuard] Direct summarization failed, trying intelligent truncation:', error.message);
+		}
+
+		// Step 3: If direct failed, use intelligent truncation (much faster than chunking)
+		if (container) {
+			container.innerHTML = '<em style="color: #64748b;">Processing large content...</em>';
+		}
+
+		try {
+			// Intelligently extract key parts (intro, middle, conclusion)
+			const truncated = this.intelligentlyTruncate(processedText, 8000); // ~2000 tokens
+			
+			const truncatePromise = summarizer.summarize(truncated, { context });
+			const timeoutPromise = new Promise((_, reject) => {
+				setTimeout(() => reject(new Error('Timeout')), TIMEOUT_MS);
+			});
+
+			const summary = await Promise.race([truncatePromise, timeoutPromise]);
+			if (summary && summary.trim()) {
+				return summary.trim();
+			}
+		} catch (error) {
+			console.warn('[LegalGuard] Truncated summarization also failed:', error.message);
+		}
+
+		// Step 4: Last resort - return intelligent fallback
+		if (container) {
+			container.innerHTML = '<em style="color: #64748b;">Generating fallback summary...</em>';
+		}
+
+		return this.generateFallbackSummary(processedText, 500);
+	}
 
 	async generatePageSummaryWithAI() {
         try {
@@ -1880,13 +2360,23 @@ Current page context:`;
 			}
 
 			// Try to get detected page language (for multilingual output)
+			// Chrome Summarizer API supports: en, es, ja
+			const supportedLanguages = ['en', 'es', 'ja'];
 			try {
 				const langRes = await chrome.tabs.sendMessage(this.currentTabId, { type: 'GET_PAGE_LANG' });
-				if (langRes?.success && typeof langRes.lang === 'string' && langRes.lang.length <= 5) {
-					pageLang = langRes.lang;
+				if (langRes?.success && typeof langRes.lang === 'string') {
+					const detectedLang = langRes.lang.toLowerCase().split('-')[0]; // Get base language code
+					if (supportedLanguages.includes(detectedLang)) {
+						pageLang = detectedLang;
+					}
 				}
 			} catch (e) {
 				// optional
+			}
+
+			// Always ensure a valid output language is specified (default to 'en')
+			if (!pageLang || !supportedLanguages.includes(pageLang)) {
+				pageLang = 'en';
 			}
 
 			if (!pageText || pageText.trim().length < 50) {
@@ -1901,7 +2391,7 @@ Current page context:`;
 					type: 'tldr',
 					format: 'plain-text',
 					length: 'medium',
-					outputLanguage: pageLang,
+					outputLanguage: pageLang, // Always a valid language code: en, es, or ja
 					sharedContext: 'Act as a legal expert. Create a concise, informative summary (100–150 words) of the page focusing on key points, obligations, rights, risks, and notable legal implications. Use clear, neutral tone.'
 				});
 			} catch (e) {
@@ -1911,17 +2401,30 @@ Current page context:`;
 					document.getElementById('lg-generate-summary')?.addEventListener('click', async () => {
 						container.innerHTML = '<em style="color: #64748b;">Generating page summary…</em>';
 						try {
+							// Ensure valid output language (default to 'en' if not set)
+							const validLang = pageLang && supportedLanguages.includes(pageLang) ? pageLang : 'en';
 							const s = await Summarizer.create({
 								type: 'tldr',
 								format: 'plain-text',
 								length: 'medium',
-								outputLanguage: pageLang,
+								outputLanguage: validLang, // Always a valid language code: en, es, or ja
 								sharedContext: 'Act as a legal expert. Create a concise, informative summary (100–150 words) of the page focusing on key points, obligations, rights, risks, and notable legal implications. Use clear, neutral tone.'
 							});
-							const text = await s.summarize(pageText, { context: 'Remove boilerplate and navigation text. Focus on substantive content.' });
+							// Use fast summarization: direct first, then intelligent truncation
+							const text = await this.summarizeFast(pageText, s, {
+								context: 'Remove boilerplate and navigation text. Focus on substantive content. Act as a legal expert. Create a concise, informative summary focusing on key points, obligations, rights, risks, and notable legal implications.',
+								container: container
+							});
 							container.textContent = (text || '').trim() || 'Summary not available';
 						} catch (innerErr) {
-							container.innerHTML = '<em style="color: #9ca3af;">Summary not available</em>';
+							console.error('[LegalGuard] Summarization failed in retry:', innerErr);
+							// Try fallback summary
+							try {
+								const fallbackText = this.generateFallbackSummary(pageText, 500);
+								container.textContent = fallbackText;
+							} catch (fallbackErr) {
+								container.innerHTML = '<em style="color: #9ca3af;">Summary not available. Content may be too long or complex.</em>';
+							}
 						}
 					});
 					return;
@@ -1932,12 +2435,21 @@ Current page context:`;
 
 			let summaryText = '';
 			try {
-				summaryText = await summarizer.summarize(pageText, {
-					context: 'Remove boilerplate and navigation text. Focus on substantive content.'
+				// Use fast summarization: direct first, then intelligent truncation
+				// Much faster and more reliable than chunking
+				summaryText = await this.summarizeFast(pageText, summarizer, {
+					context: 'Remove boilerplate and navigation text. Focus on substantive content. Act as a legal expert. Create a concise, informative summary focusing on key points, obligations, rights, risks, and notable legal implications.',
+					container: container
 				});
 			} catch (e) {
-				container.innerHTML = '<em style="color: #9ca3af;">Summary not available</em>';
-				return;
+				console.error('[LegalGuard] Summarization failed:', e);
+				// Try fallback summary
+				try {
+					summaryText = this.generateFallbackSummary(pageText, 500);
+				} catch (fallbackError) {
+					container.innerHTML = '<em style="color: #9ca3af;">Summary not available. Content may be too long or complex.</em>';
+					return;
+				}
 			}
 
 			if (!summaryText || !summaryText.trim()) {
