@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "LegalGuard",
-  "version": "5.0",
+  "version": "1.0",
+  "description": "Detects and explains legal terms on any webpage. Get instant alerts about privacy policies, terms of service, and legal risks.",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -29,7 +30,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["glossary_tri.json", "glossary_multilingual.json", "css/toast.css"],
+      "resources": ["glossary_tri.json", "glossary_multilingual.json", "css/toast.css", "icons/1024.png"],
       "matches": ["<all_urls>"]
     }
   ],

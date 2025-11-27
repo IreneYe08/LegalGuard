@@ -134,24 +134,50 @@ async function getBestTabId(sender) {
 
 // Create context menu function
 async function createContextMenu() {
-    if (!hasContextMenus) return;
+    if (!hasContextMenus) {
+        console.warn('[LG] contextMenus API not available');
+        return false;
+    }
     
     try {
         // Remove existing menu if it exists (to avoid duplicate errors)
         try {
-            chrome.contextMenus.remove('lg-open-analysis');
+            await chrome.contextMenus.remove('lg-open-analysis');
+            // Small delay to ensure removal completes
+            await new Promise(resolve => setTimeout(resolve, 50));
         } catch (e) {
-            // Ignore if it doesn't exist
+            // Ignore if it doesn't exist - this is expected
         }
         
-        chrome.contextMenus.create({
+        // Create the menu item - this returns a Promise in Manifest V3
+        await chrome.contextMenus.create({
             id: 'lg-open-analysis',
             title: 'Explain',
             contexts: ['page', 'selection', 'link']
         });
-        console.log('[LG] Context menu created');
+        console.log('[LG] Context menu created successfully');
+        return true;
     } catch (e) {
-        console.warn('[LG] Context menu creation failed:', e);
+        // If creation fails due to duplicate, try removing first
+        if (e?.message?.includes('duplicate') || e?.message?.includes('already exists')) {
+            try {
+                await chrome.contextMenus.remove('lg-open-analysis');
+                await new Promise(resolve => setTimeout(resolve, 50));
+                await chrome.contextMenus.create({
+                    id: 'lg-open-analysis',
+                    title: 'Explain', 
+                    contexts: ['page', 'selection', 'link']
+                });
+                console.log('[LG] Context menu created successfully after retry');
+                return true;
+            } catch (e2) {
+                console.error('[LG] Context menu creation failed after retry:', e2?.message || e2);
+                return false;
+            }
+        } else {
+            console.error('[LG] Context menu creation failed:', e?.message || e);
+            return false;
+        }
     }
 }
 
@@ -166,7 +192,9 @@ if (hasRuntime) {
     
     // Try set behavior and create context menu on each startup, too
     setBehavior();
-    createContextMenu();
+    createContextMenu().catch(e => {
+        console.error('[LG] Failed to create context menu on startup:', e);
+    });
 }
 
 // Toolbar icon click — always opens (valid user gesture)
@@ -185,7 +213,10 @@ if (hasAction && chrome.action.onClicked?.addListener) {
 // Context menu — valid user gesture
 if (hasContextMenus && chrome.contextMenus.onClicked?.addListener) {
     chrome.contextMenus.onClicked.addListener((info, tab) => {
-        if (info.menuItemId !== 'lg-open-analysis') return;
+        // Verify this is our menu item
+        if (info.menuItemId !== 'lg-open-analysis') {
+            return;
+        }
         
         console.log('[LG] Context menu "Explain" clicked, tab:', tab?.id, 'selection:', info.selectionText?.substring(0, 50));
         

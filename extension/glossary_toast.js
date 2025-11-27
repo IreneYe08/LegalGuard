@@ -536,7 +536,7 @@ if (
             el.className = 'lg-toast';
             el.innerHTML = `
                 <div class="lg-toast-content">
-                    <div class="lg-toast-icon">🛡️</div>
+                    <div class="lg-toast-icon"><img src="${chrome.runtime.getURL('icons/1024.png')}" alt="LegalGuard" /></div>
                     <div class="lg-toast-body">
                         <div class="lg-toast-title">${title}</div>
                         <div class="lg-toast-message">${subtitle}</div>
