@@ -132,29 +132,41 @@ async function getBestTabId(sender) {
     throw new Error('No tabId available');
 }
 
+// Create context menu function
+async function createContextMenu() {
+    if (!hasContextMenus) return;
+    
+    try {
+        // Remove existing menu if it exists (to avoid duplicate errors)
+        try {
+            chrome.contextMenus.remove('lg-open-analysis');
+        } catch (e) {
+            // Ignore if it doesn't exist
+        }
+        
+        chrome.contextMenus.create({
+            id: 'lg-open-analysis',
+            title: 'Explain',
+            contexts: ['page', 'selection', 'link']
+        });
+        console.log('[LG] Context menu created');
+    } catch (e) {
+        console.warn('[LG] Context menu creation failed:', e);
+    }
+}
+
 // Install / startup
 if (hasRuntime) {
     chrome.runtime.onInstalled.addListener(async () => {
         console.log('[LG] Extension installed/updated');
         await verifySidePanelAPI();
         setBehavior();
-        
-        if (hasContextMenus) {
-            try {
-                chrome.contextMenus.create({
-                    id: 'lg-open-analysis',
-                    title: 'See full analysis (Side Panel)',
-                    contexts: ['page', 'selection', 'link']
-                });
-                console.log('[LG] Context menu created');
-            } catch (e) {
-                console.warn('[LG] Context menu creation failed:', e);
-            }
-        }
+        await createContextMenu();
     });
     
-    // Try set behavior on each startup, too
+    // Try set behavior and create context menu on each startup, too
     setBehavior();
+    createContextMenu();
 }
 
 // Toolbar icon click — always opens (valid user gesture)
@@ -172,14 +184,53 @@ if (hasAction && chrome.action.onClicked?.addListener) {
 
 // Context menu — valid user gesture
 if (hasContextMenus && chrome.contextMenus.onClicked?.addListener) {
-    chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+    chrome.contextMenus.onClicked.addListener((info, tab) => {
         if (info.menuItemId !== 'lg-open-analysis') return;
-        try {
-            console.log('[LG] Context menu clicked for tab:', tab?.id);
-            const tabId = tab?.id ?? (await getBestTabId({}));
-            await openSidePanelForTab(tabId);
-        } catch (e) {
-            console.error('[LG] Context menu open failed:', e?.message || e);
+        
+        console.log('[LG] Context menu "Explain" clicked, tab:', tab?.id, 'selection:', info.selectionText?.substring(0, 50));
+        
+        // CRITICAL: Open side panel IMMEDIATELY to preserve user gesture
+        // Use windowId approach (more gesture-friendly) like keyboard shortcut
+        const tabId = tab?.id;
+        const windowId = tab?.windowId;
+        
+        // Store selected text (doesn't need user gesture, can happen in parallel)
+        const selectedText = info.selectionText || '';
+        if (selectedText && selectedText.trim() && typeof tabId === 'number' && tabId >= 0) {
+            chrome.storage.local.set({
+                [`lg:selectedText:${tabId}`]: {
+                    text: selectedText.trim(),
+                    timestamp: Date.now()
+                }
+            }).then(() => {
+                console.log('[LG] Stored selected text for tab:', tabId, 'length:', selectedText.length);
+            }).catch(e => {
+                console.warn('[LG] Failed to store selected text:', e);
+            });
+        }
+        
+        // Try windowId first (more gesture-friendly)
+        if (typeof windowId === 'number' && windowId >= 0) {
+            console.log('[LG] Opening side panel with windowId:', windowId);
+            chrome.sidePanel.open({ windowId }).then(() => {
+                console.log('[LG] Side panel opened successfully via windowId');
+            }).catch(e => {
+                console.warn('[LG] Opening with windowId failed, trying tabId:', e);
+                // Fallback to tabId
+                if (typeof tabId === 'number' && tabId >= 0) {
+                    openSidePanelForTab(tabId).catch(err => {
+                        console.error('[LG] Context menu open failed:', err?.message || err);
+                    });
+                }
+            });
+        } else if (typeof tabId === 'number' && tabId >= 0) {
+            // Fallback to tabId if windowId not available
+            console.log('[LG] Opening side panel with tabId:', tabId);
+            openSidePanelForTab(tabId).catch(e => {
+                console.error('[LG] Context menu open failed:', e?.message || e);
+            });
+        } else {
+            console.error('[LG] No valid tabId or windowId in context menu');
         }
     });
 }

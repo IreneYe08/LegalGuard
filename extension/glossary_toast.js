@@ -13,6 +13,12 @@ if (
 
         async function loadToastCSS() {
             try {
+                // Safety check: ensure document and head are available
+                if (!document || !document.head) {
+                    console.warn('[LegalGuard] Document or head not available for loading toast CSS');
+                    return;
+                }
+                
                 const url = chrome.runtime.getURL("css/toast.css");
                 const res = await fetch(url, { cache: "no-store" });
                 if (!res.ok) throw new Error(`CSS fetch failed: ${res.status}`);
@@ -20,8 +26,14 @@ if (
                 
                 const style = document.createElement('style');
                 style.textContent = css;
-                document.head.appendChild(style);
-                console.log('[LegalGuard] Toast CSS loaded');
+                
+                // Safety check before appending
+                if (document.head && typeof document.head.appendChild === 'function') {
+                    document.head.appendChild(style);
+                    console.log('[LegalGuard] Toast CSS loaded');
+                } else {
+                    console.warn('[LegalGuard] Cannot append toast CSS: document.head.appendChild not available');
+                }
             } catch (e) {
                 console.error('[LegalGuard] Failed to load toast CSS', e);
             }
@@ -141,13 +153,52 @@ if (
             return !(rect.width === 0 || rect.height === 0);
         };
 
+        // Check if an element is inside a footer
+        const isInFooter = (el) => {
+            if (!el) return false;
+            
+            let current = el;
+            while (current && current !== document.body) {
+                const tag = (current.tagName || '').toLowerCase();
+                const id = String(current.id || '').toLowerCase();
+                // className can be a string (SVG) or DOMTokenList (HTML), so convert to string first
+                const className = String(current.className || '').toLowerCase();
+                const role = String(current.getAttribute?.('role') || '').toLowerCase();
+                
+                // Check for footer tag
+                if (tag === 'footer') return true;
+                
+                // Check for role="contentinfo" (semantic footer)
+                if (role === 'contentinfo') return true;
+                
+                // Check for id/class containing "footer"
+                if (id.includes('footer') || className.includes('footer')) return true;
+                
+                current = current.parentElement;
+            }
+            
+            return false;
+        };
+
         const shouldSkip = el => {
             const tag = (el.tagName || '').toLowerCase();
-            return (
-                ['script', 'style', 'noscript', 'template', 'textarea', 'input', 'select'].includes(
-                    tag
-                ) || el.isContentEditable
-            );
+            
+            // Skip standard elements
+            if (['script', 'style', 'noscript', 'template', 'textarea', 'input', 'select'].includes(tag)) {
+                return true;
+            }
+            
+            // Skip contentEditable elements
+            if (el.isContentEditable) {
+                return true;
+            }
+            
+            // Skip elements inside footer
+            if (isInFooter(el)) {
+                return true;
+            }
+            
+            return false;
         };
 
         const hrefNoHash = () => location.origin + location.pathname + location.search;
@@ -171,20 +222,70 @@ if (
             );
             LG_TOAST_COUNT = 0;
             LG_COOLDOWN_UNTIL = 0;
+            console.log('[LegalGuard] Page state reset for:', currentPageKey);
         };
+        
+        // Function to clear all cache and reset state
+        const clearAllCache = () => {
+            try {
+                // Clear sessionStorage for all pages
+                const keys = Object.keys(sessionStorage);
+                keys.forEach(key => {
+                    if (key.startsWith('lg:seen:')) {
+                        sessionStorage.removeItem(key);
+                    }
+                });
+                
+                // Reset current page state
+                LG_SEEN = new Set();
+                LG_TOAST_COUNT = 0;
+                LG_COOLDOWN_UNTIL = 0;
+                
+                console.log('[LegalGuard] All cache cleared and state reset');
+                return { success: true, message: 'Cache cleared successfully' };
+            } catch (error) {
+                console.error('[LegalGuard] Error clearing cache:', error);
+                return { success: false, error: error.message };
+            }
+        };
+        
+        // Expose clearAllCache to window for console access
+        if (typeof window !== 'undefined') {
+            window.LegalGuardClearCache = clearAllCache;
+            console.log('[LegalGuard] To clear cache, run: LegalGuardClearCache() or chrome.runtime.sendMessage({type: "CLEAR_CACHE"})');
+        }
 
         /* -------------------- Toast UI -------------------- */
         function ensureToastRoot() {
+            // Safety check: ensure document and documentElement are available
+            if (!document || !document.documentElement) {
+                console.warn('[LegalGuard] Document or documentElement not available for toast');
+                return null;
+            }
+            
             let root = document.querySelector('.lg-toast-wrapper');
             if (!root) {
                 root = document.createElement('div');
                 root.className = 'lg-toast-wrapper';
-                document.documentElement.appendChild(root);
+                
+                // Safety check before appending
+                if (document.documentElement && typeof document.documentElement.appendChild === 'function') {
+                    document.documentElement.appendChild(root);
+                } else {
+                    console.warn('[LegalGuard] Cannot append toast root to documentElement');
+                    return null;
+                }
             }
             return root;
         }
 
         function ensureToastCSS() {
+            // Safety check: ensure document and head are available
+            if (!document || !document.head) {
+                console.warn('[LegalGuard] Document or head not available for toast CSS');
+                return;
+            }
+            
             if (document.getElementById('lg-toast-styles')) return;
             
             const style = document.createElement('style');
@@ -239,7 +340,13 @@ if (
                 }
                 .lg-toast-close:hover { color: #111827; }
             `;
-            document.head.appendChild(style);
+            
+            // Safety check before appending
+            if (document.head && typeof document.head.appendChild === 'function') {
+                document.head.appendChild(style);
+            } else {
+                console.warn('[LegalGuard] Cannot append toast styles: document.head.appendChild not available');
+            }
         }
 
         function getToastCopy(found) {
@@ -418,6 +525,12 @@ if (
             const root = ensureToastRoot();
             console.log('[LegalGuard] Toast root element:', root);
             
+            // Safety check: ensure root exists before proceeding
+            if (!root) {
+                console.warn('[LegalGuard] Cannot show toast: root element not available');
+                return;
+            }
+            
             root.innerHTML = '';
             const el = document.createElement('div');
             el.className = 'lg-toast';
@@ -439,7 +552,14 @@ if (
                     <button class="lg-toast-close" id="lg-close">✕</button>
                 </div>
             `;
-            root.appendChild(el);
+            
+            // Safety check before appending
+            if (root && typeof root.appendChild === 'function') {
+                root.appendChild(el);
+            } else {
+                console.warn('[LegalGuard] Cannot append toast element: root.appendChild not available');
+                return;
+            }
             
             console.log('[LegalGuard] Toast element created and appended:', el);
             console.log('[LegalGuard] Toast element computed style:', window.getComputedStyle(el));
@@ -681,14 +801,22 @@ if (
         };
 
         function scanOnce() {
-            console.log('[LegalGuard] scanOnce called');
+            console.log('[LegalGuard] scanOnce called', {
+                cooldownUntil: LG_COOLDOWN_UNTIL,
+                currentTime: now(),
+                toastCount: LG_TOAST_COUNT,
+                maxToasts: LG_MAX_TOAST_PER_PAGE,
+                seenCount: LG_SEEN.size,
+                pageKey: currentPageKey
+            });
             const ts = now();
             if (ts < LG_COOLDOWN_UNTIL) {
-                console.log('[LegalGuard] Still in cooldown period');
+                const remaining = Math.ceil((LG_COOLDOWN_UNTIL - ts) / 1000);
+                console.log(`[LegalGuard] Still in cooldown period (${remaining}s remaining)`);
                 return;
             }
             if (LG_TOAST_COUNT >= LG_MAX_TOAST_PER_PAGE) {
-                console.log('[LegalGuard] Max toasts per page reached');
+                console.log(`[LegalGuard] Max toasts per page reached (${LG_TOAST_COUNT}/${LG_MAX_TOAST_PER_PAGE})`);
                 return;
             }
 
@@ -741,7 +869,37 @@ if (
             if (found) {
                 console.log('[LegalGuard] Found legal term:', found);
                 const key = `${found.cat}|${found.pattern}`;
-                if (LG_SEEN.has(key)) return;
+                
+                // Check if already seen
+                if (LG_SEEN.has(key)) {
+                    console.log('[LegalGuard] Term already seen, skipping toast:', key);
+                    return;
+                }
+                
+                // Check cooldown
+                const ts = now();
+                if (ts < LG_COOLDOWN_UNTIL) {
+                    const remaining = Math.ceil((LG_COOLDOWN_UNTIL - ts) / 1000);
+                    console.log(`[LegalGuard] Still in cooldown (${remaining}s remaining), skipping toast`);
+                    return;
+                }
+                
+                // Check max toasts
+                if (LG_TOAST_COUNT >= LG_MAX_TOAST_PER_PAGE) {
+                    console.log(`[LegalGuard] Max toasts (${LG_MAX_TOAST_PER_PAGE}) reached, skipping toast`);
+                    return;
+                }
+                
+                // Check if site is muted
+                try {
+                    if (localStorage.getItem('lg:mute:' + location.host) === '1') {
+                        console.log('[LegalGuard] Site is muted, skipping toast');
+                        return;
+                    }
+                } catch (e) {
+                    console.warn('[LegalGuard] Could not check mute state:', e);
+                }
+                
                 LG_SEEN.add(key);
                 saveSeen();
 
@@ -756,8 +914,14 @@ if (
                 currentDetectionResults.detectedAt = new Date().toISOString();
 
                 const copy = getToastCopy(found);
+                console.log('[LegalGuard] Showing toast:', { 
+                    category: found.cat, 
+                    phrase: found.phrase, 
+                    pattern: found.pattern,
+                    toastCount: LG_TOAST_COUNT,
+                    seenCount: LG_SEEN.size
+                });
                 showToast({ title: copy.title, subtitle: copy.subtitle, allPatterns });
-                console.log('[LegalGuard] Toast shown:', { category: found.cat, phrase: found.phrase, pattern: found.pattern });
             } else {
                 console.log('[LegalGuard] No legal terms found in this scan');
             }
@@ -862,6 +1026,40 @@ if (
                 if (request.type === 'CLEAR_HIGHLIGHTS') {
                     clearAllHighlights();
                     sendResponse({ success: true });
+                    return true;
+                }
+                
+                if (request.type === 'CLEAR_CACHE') {
+                    const result = clearAllCache();
+                    sendResponse(result);
+                    return true;
+                }
+                
+                if (request.type === 'RESET_PAGE_STATE') {
+                    resetPageState();
+                    sendResponse({ success: true, message: 'Page state reset' });
+                    return true;
+                }
+                
+                if (request.type === 'GET_STATE') {
+                    sendResponse({
+                        success: true,
+                        state: {
+                            toastCount: LG_TOAST_COUNT,
+                            maxToasts: LG_MAX_TOAST_PER_PAGE,
+                            seenCount: LG_SEEN.size,
+                            cooldownUntil: LG_COOLDOWN_UNTIL,
+                            cooldownRemaining: Math.max(0, Math.ceil((LG_COOLDOWN_UNTIL - now()) / 1000)),
+                            pageKey: currentPageKey,
+                            isMuted: (() => {
+                                try {
+                                    return localStorage.getItem('lg:mute:' + location.host) === '1';
+                                } catch {
+                                    return false;
+                                }
+                            })()
+                        }
+                    });
                     return true;
                 }
 

@@ -70,6 +70,9 @@ class LegalGuardSidePanel {
         
         // Load mute state
         await this.loadMuteState();
+        
+        // Check for selected text from context menu and auto-fill
+        await this.checkForSelectedText();
     }
 
     cacheUIElements() {
@@ -318,12 +321,6 @@ class LegalGuardSidePanel {
         
         // Increment retry count synchronously (before any async ops)
         const currentAttempt = this.downloadRetryCount + 1;
-        
-        // Quick synchronous check first (no async operations)
-        if (currentAttempt > this.maxDownloadRetries) {
-            // Need to check if we should reset - do this quickly but we'll check async
-            // For now, just continue and we'll handle it after starting download
-        }
 
         this.downloadRetryCount = currentAttempt;
         
@@ -336,8 +333,6 @@ class LegalGuardSidePanel {
 
         // Check retry limit synchronously first (quick check)
         if (currentAttempt > this.maxDownloadRetries) {
-            // Need to check storage - but we'll do it AFTER starting download
-            // For now, just warn but continue
             console.warn(`[LegalGuard] Retry count ${currentAttempt} exceeds max ${this.maxDownloadRetries}, but starting download anyway to preserve user gesture`);
         }
         
@@ -355,6 +350,8 @@ class LegalGuardSidePanel {
         
         let lastProgressTime = Date.now();
         let modelNewlyDownloaded = false;
+        let downloadStarted = false;
+        let monitorAttached = false;
 
         try {
             // CRITICAL: Use the same options for create() as we use for availability()
@@ -368,10 +365,23 @@ class LegalGuardSidePanel {
                 downloadPromiseReject = reject;
             });
             
+            // Set a timeout to detect if download doesn't start within 10 seconds
+            const downloadStartTimeout = setTimeout(() => {
+                if (!downloadStarted && !monitorAttached) {
+                    console.warn('[LegalGuard] Download did not start within 10 seconds - may have lost user gesture');
+                    // Don't fail immediately - give it more time, but log the issue
+                }
+            }, 10000); // 10 seconds
+            
+            console.log('[LegalGuard] Attempting to create LanguageModel session (preserving user gesture)...');
             this.aiSession = await LanguageModel.create({
                 ...modelOptions,
                 monitor(m) {
+                    monitorAttached = true;
+                    clearTimeout(downloadStartTimeout);
                     self.downloadMonitor = m;
+                    downloadStarted = true;
+                    console.log('[LegalGuard] Download monitor attached - download has started');
                     
                     // Track progress (download is active)
                     m.addEventListener('downloadprogress', (e) => {
@@ -468,34 +478,50 @@ class LegalGuardSidePanel {
                 },
             });
             
+            // Clear the start timeout if monitor was attached
+            if (monitorAttached) {
+                clearTimeout(downloadStartTimeout);
+            }
+            
             // If session was created successfully, wait for download to complete
             // But if the model was already available, we can proceed immediately
             if (this.aiSession) {
                 // Check if download is needed or if it's already available
                 // CRITICAL: Use the same options as create()
                 const modelOptions = this.getLanguageModelOptions();
+                
+                // Wait a moment for the monitor to attach if download is needed
+                await new Promise(resolve => setTimeout(resolve, 100));
+                
                 const checkAvailability = await LanguageModel.availability(modelOptions);
+                console.log('[LegalGuard] Model availability after create:', checkAvailability, 'Monitor attached:', monitorAttached);
+                
                 if (checkAvailability === 'available') {
                     // Model is already available, no download needed
+                    clearTimeout(downloadStartTimeout);
                     this.aiAvailable = true;
                     this.downloadRetryCount = 0;
                     chrome.storage.local.remove(['lg:lastDownloadRetry']);
                     this.updateAPIStatus('available', 'AI ready! Ask any legal question.');
                     this.updateModelDownloadUI('ready');
                     return true;
-                } else {
-                    // Wait for download to complete (with timeout)
-                    try {
-                        await Promise.race([
-                            downloadPromise,
-                            new Promise((_, reject) => 
-                                setTimeout(() => reject(new Error('Download timeout')), 15 * 60 * 1000)
-                            )
-                        ]);
-                        return true;
-                    } catch (error) {
-                        return this.handleDownloadError(error);
-                    }
+                } else if (!monitorAttached && (checkAvailability === 'downloadable' || checkAvailability === 'downloading')) {
+                    // Model needs download but monitor wasn't attached - this might indicate user gesture was lost
+                    console.warn('[LegalGuard] Model needs download but monitor was not attached - user gesture may have been lost');
+                    // Still wait for download, but log the issue
+                }
+                
+                // Wait for download to complete (with timeout)
+                try {
+                    await Promise.race([
+                        downloadPromise,
+                        new Promise((_, reject) => 
+                            setTimeout(() => reject(new Error('Download timeout')), 15 * 60 * 1000)
+                        )
+                    ]);
+                    return true;
+                } catch (error) {
+                    return this.handleDownloadError(error);
                 }
             } else {
                 throw new Error('Failed to create AI session');
@@ -503,6 +529,14 @@ class LegalGuardSidePanel {
         } catch (error) {
             console.error('[LegalGuard] Could not create AI session:', error);
             this.clearDownloadTimeout();
+            
+            // Check if error is related to user gesture
+            const errorMsg = error?.message || String(error);
+            if (errorMsg.includes('user gesture') || errorMsg.includes('activation') || errorMsg.includes('gesture')) {
+                console.error('[LegalGuard] User gesture may have been lost - user needs to click again');
+                return this.handleDownloadError(new Error('User gesture required: Please click the Ask button again to start the download. Make sure to click immediately when prompted.'));
+            }
+            
             return this.handleDownloadError(error);
         }
     }
@@ -513,13 +547,29 @@ class LegalGuardSidePanel {
         
         this.cleanupFailedDownload();
         
+        // Check if error is specifically about user gesture
+        const isUserGestureError = errorMsg.toLowerCase().includes('user gesture') || 
+                                   errorMsg.toLowerCase().includes('activation') ||
+                                   error?.message?.toLowerCase().includes('user gesture') ||
+                                   error?.message?.toLowerCase().includes('activation');
+        
         // If we have retries left, show retry message
         if (this.downloadRetryCount < this.maxDownloadRetries) {
-            this.updateAPIStatus('unavailable', `${errorMsg} (Retrying automatically...)`);
-            this.updateModelDownloadUI('hidden', `${errorMsg}<br><br><strong>What you can do:</strong><br>• Ensure you have a stable internet connection<br>• Free up at least 500MB of disk space<br>• The download will retry automatically when you click "Ask" again<br>• Keep this window open during the download`);
+            if (isUserGestureError) {
+                this.updateAPIStatus('unavailable', 'User gesture required - please click "Ask" again');
+                this.updateModelDownloadUI('hidden', `The download requires a user gesture to start.<br><br><strong>What to do:</strong><br>1. Click the "Ask" button again immediately<br>2. Make sure you click as soon as you see the prompt<br>3. Keep this window open during the download<br>4. Don't navigate away while downloading<br><br><strong>Note:</strong> Chrome requires a direct user action to download AI models. Please click "Ask" again to start the download.`);
+            } else {
+                this.updateAPIStatus('unavailable', `${errorMsg} (Retrying automatically...)`);
+                this.updateModelDownloadUI('hidden', `${errorMsg}<br><br><strong>What you can do:</strong><br>• Ensure you have a stable internet connection<br>• Free up at least 500MB of disk space<br>• The download will retry automatically when you click "Ask" again<br>• Keep this window open during the download<br>• Make sure Chrome AI features are enabled in settings`);
+            }
         } else {
-            this.updateAPIStatus('unavailable', errorMsg);
-            this.updateModelDownloadUI('hidden', `${errorMsg}<br><br><strong>Troubleshooting steps:</strong><br>1. Check your internet connection is stable<br>2. Ensure you have at least 500MB free disk space<br>3. Check Chrome settings → Privacy and security → AI features are enabled<br>4. Try refreshing this page and clicking "Ask" again<br>5. If the issue persists, restart Chrome<br><br><strong>Note:</strong> Model downloads can take 5-10 minutes. Please keep this window open during the download.`);
+            if (isUserGestureError) {
+                this.updateAPIStatus('unavailable', 'User gesture required - please click "Ask" again');
+                this.updateModelDownloadUI('hidden', `The download requires a user gesture to start.<br><br><strong>Troubleshooting steps:</strong><br>1. Click the "Ask" button again immediately when prompted<br>2. Make sure you click as soon as you see the download prompt<br>3. Check Chrome settings → Privacy and security → AI features are enabled<br>4. Ensure you have at least 500MB free disk space<br>5. Check your internet connection is stable<br>6. Try refreshing this page and clicking "Ask" again<br>7. If the issue persists, restart Chrome<br><br><strong>Important:</strong> Chrome requires a direct user action (click) to download AI models. Please click "Ask" again to start the download.`);
+            } else {
+                this.updateAPIStatus('unavailable', errorMsg);
+                this.updateModelDownloadUI('hidden', `${errorMsg}<br><br><strong>Troubleshooting steps:</strong><br>1. Check your internet connection is stable<br>2. Ensure you have at least 500MB free disk space<br>3. Check Chrome settings → Privacy and security → AI features are enabled<br>4. Try refreshing this page and clicking "Ask" again<br>5. If the issue persists, restart Chrome<br><br><strong>Note:</strong> Model downloads can take 5-10 minutes. Please keep this window open during the download.`);
+            }
         }
         
         this.setPromptInputEnabled(true);
@@ -544,8 +594,33 @@ class LegalGuardSidePanel {
             // CRITICAL: Use the same options for availability() and create()
             const modelOptions = this.getLanguageModelOptions();
             
-            // Re-check availability in case it changed
-            const availability = await LanguageModel.availability(modelOptions);
+            // CRITICAL: Check availability quickly, but if it's downloadable/downloading,
+            // start the download IMMEDIATELY to preserve user gesture
+            // Don't wait for the full availability check if we know we need to download
+            let availability = this.aiAvailabilityState;
+            
+            // Only do async availability check if we don't already know the state
+            // or if we suspect it might have changed
+            if (!availability || availability === 'available') {
+                try {
+                    // Use Promise.race to avoid waiting too long for availability check
+                    availability = await Promise.race([
+                        LanguageModel.availability(modelOptions),
+                        new Promise((resolve) => setTimeout(() => resolve(null), 1000)) // 1 second timeout
+                    ]);
+                    
+                    // If availability check timed out, assume downloadable to preserve gesture
+                    if (availability === null) {
+                        console.warn('[LegalGuard] Availability check timed out - assuming downloadable to preserve user gesture');
+                        availability = 'downloadable';
+                    }
+                } catch (error) {
+                    console.warn('[LegalGuard] Availability check failed:', error);
+                    // If availability check fails, try to create anyway to preserve gesture
+                    availability = 'downloadable';
+                }
+            }
+            
             this.aiAvailabilityState = availability;
 
             if (availability === 'unavailable') {
@@ -554,8 +629,10 @@ class LegalGuardSidePanel {
                 return false;
             }
 
-            // Now we have a user gesture, safe to create session and download if needed
+            // CRITICAL: If model needs download, start IMMEDIATELY to preserve user gesture
+            // Don't do any other async operations before this
             if (availability === 'downloadable' || availability === 'downloading') {
+                console.log('[LegalGuard] Model needs download - starting immediately to preserve user gesture');
                 return await this.startModelDownload();
             } else if (availability === 'available') {
                 try {
@@ -572,6 +649,13 @@ class LegalGuardSidePanel {
                 } catch (error) {
                     console.error('[LegalGuard] Could not create AI session:', error);
                     const errorMsg = this.getErrorMessage(error);
+                    
+                    // If error suggests download is needed, try starting download
+                    if (errorMsg.includes('download') || errorMsg.includes('gesture')) {
+                        console.log('[LegalGuard] Error suggests download needed - attempting download');
+                        return await this.startModelDownload();
+                    }
+                    
                     this.updateAPIStatus('unavailable', errorMsg);
                     this.updateModelDownloadUI('hidden', `Failed to initialize AI: ${errorMsg}`);
                     this.setPromptInputEnabled(true);
@@ -583,6 +667,13 @@ class LegalGuardSidePanel {
         } catch (error) {
             console.error('[LegalGuard] Failed to ensure AI session:', error);
             const errorMsg = this.getErrorMessage(error);
+            
+            // If error suggests we need a download, try that
+            if (errorMsg.includes('download') || errorMsg.includes('gesture')) {
+                console.log('[LegalGuard] Error suggests download needed - attempting download');
+                return await this.startModelDownload();
+            }
+            
             this.updateAPIStatus('unavailable', `AI initialization failed: ${errorMsg}`);
             this.updateModelDownloadUI('hidden', `AI initialization failed: ${errorMsg}`);
             this.cleanupFailedDownload();
@@ -813,34 +904,95 @@ class LegalGuardSidePanel {
 
         const template = languageTemplates[targetLanguage] || languageTemplates['en'];
         
-        let systemPrompt = `You are a helpful legal assistant. Your role is to explain legal terms and clauses in clear, structured language.
+        const languageName = targetLanguage === 'en' ? 'English' : 
+                            targetLanguage === 'es' ? 'Spanish' : 
+                            targetLanguage === 'fr' ? 'French' : 
+                            targetLanguage === 'de' ? 'German' : 
+                            targetLanguage === 'it' ? 'Italian' : 
+                            targetLanguage === 'pt' ? 'Portuguese' : 
+                            targetLanguage === 'zh' ? 'Chinese' : 
+                            targetLanguage === 'ja' ? 'Japanese' : 'English';
+
+        let systemPrompt = `You are LegalGuard, an AI assistant that explains, summarizes, and locates Terms of Service (TOS), Privacy Policies, and AI Policies on any website.
+
+Your job is to:
+
+1. Answer the user's question directly with concrete, specific examples.
+
+2. Give practical implications with real-world scenarios.
+
+3. Give actionable safety guidance with specific steps users can take.
+
+4. Reference the relevant sections of the TOS/Policy if available.
+
+5. Provide concrete examples of how data might be shared, used, or stored based on common industry practices.
+
+6. When discussing data security, give specific, actionable steps (e.g., "Enable 2FA", "Use a password manager", "Review app permissions monthly").
+
+=====================================================
+
+OUTPUT FORMAT RULES — MUST FOLLOW
+
+=====================================================
+
+🟣 1. Layout must be **tight and compact**:
+- Do NOT insert extra blank lines.
+- Keep **only one** blank line between sections.
+- Bullet lists should have **no extra spacing** between items.
+- Avoid long paragraphs; keep lines short.
+
+🟣 2. Section rules - CRITICAL: Determine question type FIRST:
+
+**YES/NO questions** (use "Short answer:"):
+- Questions that can be answered with Yes/No/It depends
+- Examples: "Will my data be used for AI?", "Can I resell this?", "Do I keep ownership?", "Is this allowed?"
+- Format:
+  **Short answer:** Yes / No / It depends (1 short sentence only)
+  **What this means for you**
+  **How to reduce risk**
+  **Relevant TOS sections**
+
+**EXPLANATORY questions** (use "Direct answer:" - NO "Short answer"):
+- Questions asking for explanation, meaning, location, or how something works
+- Examples: "Explain this clause", "What does this mean?", "Where is the AI policy?", "How does this work?", "What is [term]?"
+- Format:
+  **Direct answer:** <1–2 sentences with concrete examples>
+  **Details** (include specific examples of how data is shared, stored, or used)
+  **What this means for you** (with real-world scenarios)
+  **How to reduce risk** (specific, actionable steps like "Enable 2FA", "Use a password manager", "Review privacy settings monthly")
+  **Relevant TOS sections**
+
+**IMPORTANT**: If the question starts with "explain", "what", "how", "where", "why", or asks for meaning/definition, it is NOT a Yes/No question. Do NOT use "Short answer: Yes/No". Use "Direct answer:" instead.
+
+🟣 3. If AI policy is not found:
+- Say clearly: "The provided text does not include an AI policy."
+- Then provide:
+  **Estimated summary (not from the website):** <3–5 compact bullet points>
+- Mark clearly this is an estimate, not the website's text.
+
+🟣 4. Tone and clarity:
+- Simple English.
+- Very practical with concrete examples.
+- No legal jargon.
+- No long text blocks.
+- Always include specific examples: "For example, your meeting transcripts might be shared with third-party analytics services" or "Your data could be used to train AI models that power features like auto-summarization."
+- When discussing security, give specific steps: "Enable two-factor authentication", "Use a unique password", "Review connected apps monthly", etc.
+
+🟣 5. Never hallucinate actual policy text.
+- Only quote what is provided.
+- Industry-practice guesses must be labeled: "Estimated summary (not from the website)."
+
+=====================================================
 
 CRITICAL REQUIREMENTS:
 - Return MARKDOWN ONLY. No HTML tags. No <div>, <p>, <span>, <br>, etc.
-- Write in the target language: ${targetLanguage === 'en' ? 'English' : targetLanguage === 'es' ? 'Spanish' : targetLanguage === 'fr' ? 'French' : targetLanguage === 'de' ? 'German' : targetLanguage === 'it' ? 'Italian' : targetLanguage === 'pt' ? 'Portuguese' : targetLanguage === 'zh' ? 'Chinese' : targetLanguage === 'ja' ? 'Japanese' : 'English'}
-- Hard limit: ≤ 160 words total
-- Use this exact structure:
-
-### [Short Title]
-
-${template.summary} [2 sentences maximum]
-
-#### [Bold Heading 1]
-[1-2 short lines]
-
-#### [Bold Heading 2] 
-[1-2 short lines]
-
-#### [Bold Heading 3]
-[1-2 short lines]
-
-${template.keyPoints}
-${template.bulletPrefix} [Risk/Next-step bullet 1]
-${template.bulletPrefix} [Risk/Next-step bullet 2] 
-${template.bulletPrefix} [Risk/Next-step bullet 3]
-${template.bulletPrefix} [Risk/Next-step bullet 4]
-
-${template.wordCount}`;
+- Write in ${languageName}
+- Follow these format rules strictly.
+- **CRITICAL**: Questions starting with "explain", "what", "how", "where", "why" or asking for meaning/definition are EXPLANATORY questions. Use "Direct answer:" NOT "Short answer: Yes/No".
+- **ALWAYS provide concrete examples**: Instead of "data may be shared", say "your meeting transcripts, email content, or usage patterns may be shared with third-party analytics services, advertising partners, or AI training providers."
+- **ALWAYS give specific, actionable steps**: Instead of "improve security", say "Enable two-factor authentication, use a password manager with unique passwords, review connected apps monthly, and check privacy settings quarterly."
+- When discussing data sharing, provide specific examples of what data types (transcripts, emails, usage data, metadata) and who might receive it (analytics services, advertisers, AI providers, partners).
+- Your priority is: **Be correct → Be clear → Be practical with examples → Be helpful with actionable steps.**`;
 
         if (tone === 'eli3') {
             systemPrompt += `
@@ -851,7 +1003,8 @@ ELI3 MODE REQUIREMENTS:
 - Use words a 3-year-old would understand
 - Keep sentences short and clear
 - Use fun analogies when possible
-- Examples: "🎯 This means..." "💡 Remember..." "⚠️ Watch out for..."`;
+- Examples: "🎯 This means..." "💡 Remember..." "⚠️ Watch out for..."
+- Still follow the intelligent answer structure (Short answer for Yes/No questions, Direct answer for others)`;
         }
 
         systemPrompt += `
@@ -1648,8 +1801,14 @@ Current page context:`;
         }
         messageElement.textContent = content;
 
-        messagesContainer.appendChild(messageElement);
-        this.scrollToBottom();
+        // Safety check before appending
+        if (messagesContainer && typeof messagesContainer.appendChild === 'function') {
+            messagesContainer.appendChild(messageElement);
+            this.scrollToBottom();
+        } else {
+            console.warn('[LegalGuard] Cannot append message: messagesContainer.appendChild not available');
+            return null;
+        }
         
         return messageElement;
     }
@@ -1683,14 +1842,24 @@ Current page context:`;
             originalBtn.classList.remove('active');
         });
         
-        controlsDiv.appendChild(originalBtn);
-        controlsDiv.appendChild(translatedBtn);
+        // Safety checks before appending
+        if (controlsDiv && typeof controlsDiv.appendChild === 'function') {
+            controlsDiv.appendChild(originalBtn);
+            controlsDiv.appendChild(translatedBtn);
+        } else {
+            console.warn('[LegalGuard] Cannot append translation controls: appendChild not available');
+            return;
+        }
         
         // Set initial content to translated version (since Translated button is active by default)
         messageElement.innerHTML = translatedText;
         
-        // Insert controls after the message
-        messageElement.parentNode.insertBefore(controlsDiv, messageElement.nextSibling);
+        // Insert controls after the message (with safety check)
+        if (messageElement.parentNode && typeof messageElement.parentNode.insertBefore === 'function') {
+            messageElement.parentNode.insertBefore(controlsDiv, messageElement.nextSibling);
+        } else {
+            console.warn('[LegalGuard] Cannot insert translation controls: parentNode.insertBefore not available');
+        }
     }
 
     async loadLanguagePreferences() {
@@ -1806,6 +1975,46 @@ Current page context:`;
         }
     }
 
+    async checkForSelectedText() {
+        try {
+            if (!this.currentTabId) return;
+            
+            // Check for stored selected text from context menu
+            const result = await chrome.storage.local.get([`lg:selectedText:${this.currentTabId}`]);
+            const selectedTextData = result[`lg:selectedText:${this.currentTabId}`];
+            
+            if (selectedTextData && selectedTextData.text) {
+                const selectedText = selectedTextData.text;
+                const timestamp = selectedTextData.timestamp || 0;
+                const age = Date.now() - timestamp;
+                
+                // Only use if it's recent (within last 30 seconds)
+                if (age < 30000 && selectedText.trim()) {
+                    console.log('[LegalGuard] Found selected text from context menu:', selectedText.substring(0, 50));
+                    
+                    // Auto-fill the chat input with explanation prompt
+                    const chatInput = this.elements?.chatInput || document.getElementById('chat-input');
+                    if (chatInput) {
+                        // Create an explanation prompt
+                        const explanationPrompt = `Explain this clause: "${selectedText.trim()}"`;
+                        chatInput.value = explanationPrompt;
+                        this.hasInputText = true;
+                        this.syncPromptControls();
+                        
+                        // Optionally auto-send (or just fill and let user click)
+                        // For now, just fill it - user can click send
+                        console.log('[LegalGuard] Auto-filled chat input with selected text');
+                    }
+                    
+                    // Clear the stored text so it doesn't trigger again
+                    await chrome.storage.local.remove([`lg:selectedText:${this.currentTabId}`]);
+                }
+            }
+        } catch (error) {
+            console.warn('[LegalGuard] Error checking for selected text:', error);
+        }
+    }
+
     async clearConversation() {
         this.conversationHistory = [];
         await this.saveConversationHistory();
@@ -1895,26 +2104,81 @@ Current page context:`;
     renderPageSummary() {
         const summaryElement = document.getElementById('pageSummary');
         if (!summaryElement) return;
-
-        const { pageSummary, categories, totalTerms, foundTerms, detectedAt, detectionDetails } = this.currentData;
         
 		summaryElement.innerHTML = `
-			<p><strong>Analysis Summary:</strong></p>
-			<p>${pageSummary || 'Legal terms analysis completed.'}</p>
-			<p style="margin-top: 8px; font-size: 12px; color: #6b7280;">
-				Found ${totalTerms || 0} legal terms across ${Object.keys(categories || {}).length} categories.
-				${detectedAt ? `Detected at ${new Date(detectedAt).toLocaleTimeString()}` : ''}
-			</p>
-			<div id="summary-section" style="margin-top: 12px; padding: 8px; background: #f0f9ff; border-radius: 8px; font-size: 12px;">
-				<em style="color: #64748b;">Generating page summary…</em>
-			</div>
-			${detectionDetails ? `
-				<div style="margin-top: 8px; padding: 8px; background: #f0fdf4; border-radius: 8px; font-size: 12px;">
-					<strong>Detection Details:</strong><br>
-					Total: ${detectionDetails.totalDetections} terms<br>
-					Categories: ${detectionDetails.categoriesFound.join(', ')}
+			<div class="page-analysis-container">
+				<!-- Section 1: Page Summary -->
+				<div class="analysis-section">
+					<div class="analysis-section-title">
+						<span class="section-icon">🔍</span>
+						<span>Page Summary</span>
+					</div>
+					<div id="summary-section" class="summary-text">
+						<em style="color: #64748b;">Generating page summary…</em>
+					</div>
 				</div>
-			` : ''}
+
+				<!-- Section 2: Key Risks & Data Use -->
+				<div class="analysis-section">
+					<div class="analysis-section-title">
+						<span>Key Risks & Data Use</span>
+					</div>
+					<div id="legal-signals-grid" class="legal-signals-grid">
+						<div class="signal-card">
+							<div class="signal-label-line">
+								<span class="signal-icon">👤</span>
+								<span class="signal-label-bold">Ownership – What you keep</span>
+							</div>
+							<div class="signal-description" id="signal-ownership">Analyzing…</div>
+						</div>
+						<div class="signal-card">
+							<div class="signal-label-line">
+								<span class="signal-icon">📄</span>
+								<span class="signal-label-bold">License – How your content can be used</span>
+							</div>
+							<div class="signal-description" id="signal-license">Analyzing…</div>
+						</div>
+						<div class="signal-card">
+							<div class="signal-label-line">
+								<span class="signal-icon">🔒</span>
+								<span class="signal-label-bold">Restrictions – What you could lose</span>
+							</div>
+							<div class="signal-description" id="signal-restrictions">Analyzing…</div>
+						</div>
+						<div class="signal-card">
+							<div class="signal-label-line">
+								<span class="signal-icon">⚠️</span>
+								<span class="signal-label-bold">Age – Who is responsible</span>
+							</div>
+							<div class="signal-description" id="signal-age">Analyzing…</div>
+						</div>
+						<div class="signal-card">
+							<div class="signal-label-line">
+								<span class="signal-icon">🔧</span>
+								<span class="signal-label-bold">Changes – Moving target</span>
+							</div>
+							<div class="signal-description" id="signal-changes">Analyzing…</div>
+						</div>
+						<div class="signal-card">
+							<div class="signal-label-line">
+								<span class="signal-icon">🤖</span>
+								<span class="signal-label-bold">AI Policy – How AI may use your data</span>
+							</div>
+							<div class="signal-description" id="signal-ai">Analyzing…</div>
+						</div>
+					</div>
+				</div>
+
+				<!-- Section 3: Extracted Clause -->
+				<div class="analysis-section" id="extracted-clause-section" style="display: none;">
+					<div class="analysis-section-title">
+						<span>Extracted Clause</span>
+					</div>
+					<div id="extracted-clause" class="extracted-clause-box">
+						<!-- Clause content will be inserted here -->
+					</div>
+				</div>
+			</div>
 		`;
 
 		// Kick off AI summarization (non-blocking)
@@ -2347,16 +2611,37 @@ Current page context:`;
                 return;
             }
 
+			// Ensure we have a current tab ID
+			if (!this.currentTabId) {
+				await this.getCurrentTab();
+			}
+
 			// Retrieve page text from the content script
 			let pageText = '';
 			let pageLang = undefined;
-			try {
-				const response = await chrome.tabs.sendMessage(this.currentTabId, { type: 'GET_PAGE_TEXT' });
-				if (response?.success && typeof response.text === 'string') {
-					pageText = response.text;
+			if (this.currentTabId) {
+				try {
+					const response = await chrome.tabs.sendMessage(this.currentTabId, { type: 'GET_PAGE_TEXT' });
+					if (response?.success && typeof response.text === 'string') {
+						pageText = response.text;
+						console.log('[LegalGuard] Retrieved page text, length:', pageText.length);
+					} else {
+						console.warn('[LegalGuard] Failed to get page text:', response);
+					}
+				} catch (e) {
+					console.warn('[LegalGuard] Error getting page text:', e.message);
 				}
-			} catch (e) {
-				// ignore; will fallback below
+			} else {
+				console.warn('[LegalGuard] No current tab ID available');
+			}
+
+			// Fallback: Try to get text from currentData if page text retrieval failed
+			if ((!pageText || pageText.trim().length < 50) && this.currentData) {
+				if (this.currentData.foundTerms && this.currentData.foundTerms.length > 0) {
+					// Extract text from found terms as fallback
+					pageText = this.currentData.foundTerms.map(t => t.context || t.phrase || '').join(' ').slice(0, 5000);
+					console.log('[LegalGuard] Using fallback text from detected terms, length:', pageText.length);
+				}
 			}
 
 			// Try to get detected page language (for multilingual output)
@@ -2380,7 +2665,13 @@ Current page context:`;
 			}
 
 			if (!pageText || pageText.trim().length < 50) {
-				container.innerHTML = '<em style="color: #9ca3af;">Summary not available</em>';
+				const reason = !pageText ? 'No page content available' : `Page content too short (${pageText.trim().length} chars, need 50+)`;
+				console.warn('[LegalGuard] Cannot generate summary:', reason);
+				container.innerHTML = `<em style="color: #9ca3af;">Summary not available. ${reason}. Please ensure the page has loaded and contains legal text.</em>`;
+				// Still try to extract signals from currentData if available
+				if (this.currentData && this.currentData.categories) {
+					this.extractLegalSignalsFromCategories();
+				}
 				return;
 			}
 
@@ -2392,7 +2683,7 @@ Current page context:`;
 					format: 'plain-text',
 					length: 'medium',
 					outputLanguage: pageLang, // Always a valid language code: en, es, or ja
-					sharedContext: 'Act as a legal expert. Create a concise, informative summary (100–150 words) of the page focusing on key points, obligations, rights, risks, and notable legal implications. Use clear, neutral tone.'
+					sharedContext: 'Act as a legal expert. Create a compact Page Summary (100–150 words) highlighting ONLY: (1) User rights - ownership and licenses granted/retained, (2) Platform privileges - what the platform can do with user content/data, (3) AI-related clauses - clearly state yes/no/unclear if AI usage is mentioned, (4) Key restrictions - important limitations or prohibitions, (5) Age requirements - minimum age or age-related restrictions, (6) Risk-relevant notes - important warnings or liability limitations. Use clear, neutral tone. Do NOT include technical metadata like term counts or category counts.'
 				});
 			} catch (e) {
 				// If user activation is required, show a button to retry
@@ -2408,20 +2699,30 @@ Current page context:`;
 								format: 'plain-text',
 								length: 'medium',
 								outputLanguage: validLang, // Always a valid language code: en, es, or ja
-								sharedContext: 'Act as a legal expert. Create a concise, informative summary (100–150 words) of the page focusing on key points, obligations, rights, risks, and notable legal implications. Use clear, neutral tone.'
+								sharedContext: 'Act as a legal expert. Create a compact Page Summary (100–150 words) highlighting ONLY: (1) User rights - ownership and licenses granted/retained, (2) Platform privileges - what the platform can do with user content/data, (3) AI-related clauses - clearly state yes/no/unclear if AI usage is mentioned, (4) Key restrictions - important limitations or prohibitions, (5) Age requirements - minimum age or age-related restrictions, (6) Risk-relevant notes - important warnings or liability limitations. Use clear, neutral tone. Do NOT include technical metadata like term counts or category counts.'
 							});
 							// Use fast summarization: direct first, then intelligent truncation
 							const text = await this.summarizeFast(pageText, s, {
-								context: 'Remove boilerplate and navigation text. Focus on substantive content. Act as a legal expert. Create a concise, informative summary focusing on key points, obligations, rights, risks, and notable legal implications.',
+								context: 'Remove boilerplate and navigation text. Focus on substantive content. Create a compact Page Summary highlighting ONLY: (1) User rights - ownership and licenses, (2) Platform privileges - what platform can do with user content/data, (3) AI-related clauses - yes/no/unclear, (4) Key restrictions, (5) Age requirements, (6) Risk-relevant notes. Do NOT include technical metadata.',
 								container: container
 							});
-							container.textContent = (text || '').trim() || 'Summary not available';
+							const summaryText = (text || '').trim() || 'Summary not available';
+							container.textContent = summaryText;
+							// Extract legal signals from summary
+							if (summaryText && summaryText !== 'Summary not available') {
+								this.extractLegalSignals(summaryText);
+							}
 						} catch (innerErr) {
 							console.error('[LegalGuard] Summarization failed in retry:', innerErr);
 							// Try fallback summary
 							try {
 								const fallbackText = this.generateFallbackSummary(pageText, 500);
-								container.textContent = fallbackText;
+								const fallbackSummary = fallbackText || 'Summary not available';
+								container.textContent = fallbackSummary;
+								// Extract legal signals from fallback summary
+								if (fallbackSummary && fallbackSummary !== 'Summary not available') {
+									this.extractLegalSignals(fallbackSummary);
+								}
 							} catch (fallbackErr) {
 								container.innerHTML = '<em style="color: #9ca3af;">Summary not available. Content may be too long or complex.</em>';
 							}
@@ -2438,7 +2739,7 @@ Current page context:`;
 				// Use fast summarization: direct first, then intelligent truncation
 				// Much faster and more reliable than chunking
 				summaryText = await this.summarizeFast(pageText, summarizer, {
-					context: 'Remove boilerplate and navigation text. Focus on substantive content. Act as a legal expert. Create a concise, informative summary focusing on key points, obligations, rights, risks, and notable legal implications.',
+					context: 'Remove boilerplate and navigation text. Focus on substantive content. Create a compact Page Summary highlighting ONLY: (1) User rights - ownership and licenses, (2) Platform privileges - what platform can do with user content/data, (3) AI-related clauses - yes/no/unclear, (4) Key restrictions, (5) Age requirements, (6) Risk-relevant notes. Do NOT include technical metadata.',
 					container: container
 				});
 			} catch (e) {
@@ -2459,11 +2760,171 @@ Current page context:`;
 
 			// Insert the summary
 			container.textContent = summaryText.trim();
+			
+			// Extract and display key legal signals from the summary
+			this.extractLegalSignals(summaryText.trim());
 		} catch (error) {
+			console.error('[LegalGuard] Page summary generation error:', error);
 			const container = document.getElementById('summary-section');
 			if (container) {
-				container.innerHTML = '<em style="color: #9ca3af;">Summary not available</em>';
+				const errorMsg = error?.message || 'Unknown error';
+				container.innerHTML = `<em style="color: #9ca3af;">Summary not available. Error: ${errorMsg}</em>`;
 			}
+			// Still try to extract signals from currentData if available
+			if (this.currentData && this.currentData.categories) {
+				this.extractLegalSignalsFromCategories();
+			}
+		}
+	}
+
+	extractLegalSignals(summaryText) {
+		if (!summaryText) return;
+
+		const text = summaryText.toLowerCase();
+		
+		// Extract ownership information - risk-focused
+		const ownershipEl = document.getElementById('signal-ownership');
+		if (ownershipEl) {
+			if (text.includes('retain ownership') || text.includes('you own') || text.includes('your ownership')) {
+				if (text.includes('delete') || text.includes('remove')) {
+					ownershipEl.textContent = 'You keep copyright, but the platform may keep copies and a license even if you delete your account.';
+				} else {
+					ownershipEl.textContent = 'You keep copyright, but the platform may retain a license to use your content.';
+				}
+			} else if (text.includes('grant') && text.includes('license')) {
+				ownershipEl.textContent = 'You keep copyright, but grant the platform broad rights to use your content.';
+			} else if (text.includes('intellectual property') || text.includes('ip')) {
+				ownershipEl.textContent = 'IP terms apply. Review what rights you retain versus what the platform can use.';
+			} else {
+				ownershipEl.textContent = 'Check terms to see what ownership rights you keep versus what the platform claims.';
+			}
+		}
+
+		// Extract license information - risk-focused
+		const licenseEl = document.getElementById('signal-license');
+		if (licenseEl) {
+			if (text.includes('exclusive') || text.includes('transfer')) {
+				licenseEl.textContent = 'Platform can use your uploads broadly, including for promotion, new features, or potentially transferring rights.';
+			} else if (text.includes('limited') || text.includes('non-exclusive')) {
+				licenseEl.textContent = 'Platform can use your uploads to run the service and possibly for promotion or new features.';
+			} else if (text.includes('license')) {
+				licenseEl.textContent = 'Platform can use your uploads to run the service and possibly for promotion or new features.';
+			} else {
+				licenseEl.textContent = 'Review terms to understand how the platform can use your content.';
+			}
+		}
+
+		// Extract restrictions - risk-focused
+		const restrictionsEl = document.getElementById('signal-restrictions');
+		if (restrictionsEl) {
+			const riskParts = [];
+			if (text.includes('resale') || text.includes('resell')) {
+				riskParts.push('If you resell or misuse content');
+			}
+			if (text.includes('suspend') || text.includes('terminate') || text.includes('ban')) {
+				riskParts.push('your account and access to paid features may be suspended or terminated');
+			} else if (text.includes('account') && (text.includes('close') || text.includes('remove'))) {
+				riskParts.push('your account may be closed');
+			}
+			if (text.includes('unauthorized') || text.includes('copying')) {
+				if (!riskParts.length) riskParts.push('Unauthorized copying or use');
+				riskParts.push('may result in account action');
+			}
+			if (text.includes('commercial use') && text.includes('prohibited')) {
+				if (!riskParts.length) riskParts.push('Commercial use violations');
+				riskParts.push('may lead to restrictions');
+			}
+			if (riskParts.length > 0) {
+				restrictionsEl.textContent = riskParts.join(', ') + '.';
+			} else if (text.includes('privacy') || text.includes('data')) {
+				restrictionsEl.textContent = 'Privacy violations may result in account restrictions or data access limitations.';
+			} else {
+				restrictionsEl.textContent = 'Review terms to understand what actions could result in account suspension or content removal.';
+			}
+		}
+
+		// Extract age requirements - risk-focused
+		const ageEl = document.getElementById('signal-age');
+		if (ageEl) {
+			const ageMatch = text.match(/(\d+)\+|\bage\s+(\d+)|must be (\d+)|minimum.*?(\d+)/);
+			if (ageMatch) {
+				const age = ageMatch[1] || ageMatch[2] || ageMatch[3] || ageMatch[4];
+				ageEl.textContent = `If you're under ${age}, the account may be invalid and parents/guardians may be held responsible.`;
+			} else if (text.includes('18') || text.includes('adult') || text.includes('age of majority')) {
+				ageEl.textContent = 'If you\'re under 18, the account may be invalid and parents/guardians may be held responsible.';
+			} else if (text.includes('13') || text.includes('coppa')) {
+				ageEl.textContent = 'If you\'re under 13, the account may be invalid and parents/guardians may be held responsible.';
+			} else {
+				ageEl.textContent = 'Check age requirements—underage accounts may be invalid and parents may be held responsible.';
+			}
+		}
+
+		// Extract changes/updates policy - risk-focused
+		const changesEl = document.getElementById('signal-changes');
+		if (changesEl) {
+			if (text.includes('update') || text.includes('modify') || text.includes('change')) {
+				changesEl.textContent = 'Terms can change; continuing to use the service means you accept the new rules.';
+			} else {
+				changesEl.textContent = 'Review terms—they may change, and continued use typically means acceptance of new rules.';
+			}
+		}
+
+		// Extract AI policy - risk-focused
+		const aiEl = document.getElementById('signal-ai');
+		if (aiEl) {
+			if (text.includes('ai') || text.includes('artificial intelligence') || text.includes('machine learning')) {
+				if (text.includes('train') || text.includes('training') || text.includes('model')) {
+					aiEl.textContent = 'Your uploads may be used to train or improve AI tools unless the policy or settings say otherwise.';
+				} else {
+					aiEl.textContent = 'Your data may be used for AI features. Check if you can opt out or control this usage.';
+				}
+			} else {
+				aiEl.textContent = 'AI usage not explicitly mentioned. Your data may still be used for AI features unless stated otherwise.';
+			}
+		}
+	}
+
+	extractLegalSignalsFromCategories() {
+		// Fallback: extract signals from detected categories when summary is not available
+		if (!this.currentData || !this.currentData.categories) return;
+
+		const categories = this.currentData.categories;
+		const ownershipEl = document.getElementById('signal-ownership');
+		const licenseEl = document.getElementById('signal-license');
+		const restrictionsEl = document.getElementById('signal-restrictions');
+		const ageEl = document.getElementById('signal-age');
+		const changesEl = document.getElementById('signal-changes');
+		const aiEl = document.getElementById('signal-ai');
+
+		// Set based on detected categories - risk-focused
+		if (categories['Intellectual Property'] || categories['intellectual_property']) {
+			if (ownershipEl) ownershipEl.textContent = 'IP terms apply. Review what rights you retain versus what the platform can use.';
+			if (licenseEl) licenseEl.textContent = 'Platform can use your uploads to run the service and possibly for promotion or new features.';
+		}
+
+		if (categories['User Conduct'] || categories['user_conduct']) {
+			if (restrictionsEl) restrictionsEl.textContent = 'Violations of user conduct rules may result in account suspension or termination.';
+		}
+
+		if (categories['Data & Privacy'] || categories['data_&_privacy']) {
+			if (restrictionsEl) restrictionsEl.textContent = 'Privacy violations may result in account restrictions or data access limitations.';
+		}
+
+		// Check for AI-related categories
+		const hasAI = Object.keys(categories).some(cat => 
+			cat.toLowerCase().includes('ai') || 
+			cat.toLowerCase().includes('artificial intelligence')
+		);
+		if (aiEl) {
+			aiEl.textContent = hasAI ? 'Your uploads may be used to train or improve AI tools unless the policy or settings say otherwise.' : 'AI usage not explicitly mentioned. Your data may still be used for AI features unless stated otherwise.';
+		}
+
+		// Set defaults for missing signals
+		if (ageEl && !ageEl.textContent || ageEl.textContent === 'Analyzing…') {
+			ageEl.textContent = 'Check age requirements—underage accounts may be invalid and parents may be held responsible.';
+		}
+		if (changesEl && (!changesEl.textContent || changesEl.textContent === 'Analyzing…')) {
+			changesEl.textContent = 'Review terms—they may change, and continued use typically means acceptance of new rules.';
 		}
 	}
 

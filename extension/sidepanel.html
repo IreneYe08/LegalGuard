@@ -164,6 +164,96 @@
             color: #6b7280;
         }
 
+        /* Page Analysis Redesign */
+        .page-analysis-container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .analysis-section {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .analysis-section-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #1a1a1a;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .section-icon {
+            font-size: 14px;
+        }
+
+        .summary-text {
+            font-size: 14px;
+            line-height: 1.6;
+            color: #374151;
+        }
+
+        .legal-signals-grid {
+            display: grid;
+            grid-template-columns: repeat(1, 1fr);
+            gap: 12px;
+        }
+
+        @media (min-width: 400px) {
+            .legal-signals-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        .signal-card {
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .signal-label-line {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 600;
+            font-size: 13px;
+            color: #1a1a1a;
+            margin-bottom: 2px;
+        }
+
+        .signal-icon {
+            font-size: 16px;
+            flex-shrink: 0;
+        }
+
+        .signal-label-bold {
+            flex: 1;
+        }
+
+        .signal-description {
+            font-size: 12px;
+            line-height: 1.5;
+            color: #6b7280;
+            margin-top: 2px;
+        }
+
+        .extracted-clause-box {
+            background: #eff6ff;
+            border: 1px solid #bfdbfe;
+            border-radius: 12px;
+            padding: 16px;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #1e40af;
+        }
+
         /* Risk Items */
         .risk-list {
             display: flex;
@@ -287,7 +377,7 @@
             padding: 16px;
             display: flex;
             flex-direction: column;
-            gap: 12px;
+            gap: 8px;
         }
 
         .message {
@@ -450,7 +540,7 @@
         /* Structured Content Styles - Typography Consistency */
         .structured-content {
             font-size: 14px;
-            line-height: 1.6;
+            line-height: 1.4;
             white-space: pre-wrap;
         }
 
@@ -463,23 +553,23 @@
         .structured-content h6 {
             font-size: 14px;
             font-weight: 600;
-            margin: 0.5rem 0;
+            margin: 0.25rem 0 0.125rem 0;
             color: #1a1a1a;
         }
 
         .structured-content p {
-            margin: 0.5rem 0;
+            margin: 0.125rem 0;
             color: #374151;
         }
 
         .structured-content ul,
         .structured-content ol {
-            margin: 0.5rem 1rem;
+            margin: 0.125rem 1rem;
             padding-left: 20px;
         }
 
         .structured-content li {
-            margin: 0.25rem 0;
+            margin: 0;
             color: #374151;
         }
 
@@ -496,13 +586,56 @@
         }
 
         .structured-content blockquote {
-            margin: 0.5rem 0;
+            margin: 0.25rem 0;
             padding: 8px 12px;
             background: #f9fafb;
             border-left: 4px solid #3b82f6;
             border-radius: 4px;
             font-style: italic;
             color: #4b5563;
+        }
+        
+        /* Remove extra spacing from markdown output */
+        .structured-content > *:first-child {
+            margin-top: 0;
+        }
+        
+        .structured-content > *:last-child {
+            margin-bottom: 0;
+        }
+        
+        /* Compact spacing between sections */
+        .structured-content h1 + p,
+        .structured-content h2 + p,
+        .structured-content h3 + p,
+        .structured-content h4 + p,
+        .structured-content h5 + p,
+        .structured-content h6 + p {
+            margin-top: 0.125rem;
+        }
+        
+        .structured-content p + h1,
+        .structured-content p + h2,
+        .structured-content p + h3,
+        .structured-content p + h4,
+        .structured-content p + h5,
+        .structured-content p + h6 {
+            margin-top: 0.5rem;
+        }
+        
+        .structured-content ul + h1,
+        .structured-content ul + h2,
+        .structured-content ul + h3,
+        .structured-content ul + h4,
+        .structured-content ul + h5,
+        .structured-content ul + h6,
+        .structured-content ol + h1,
+        .structured-content ol + h2,
+        .structured-content ol + h3,
+        .structured-content ol + h4,
+        .structured-content ol + h5,
+        .structured-content ol + h6 {
+            margin-top: 0.5rem;
         }
 
         .structured-content code {
@@ -717,26 +850,6 @@
 
     <!-- Main Content -->
     <div class="content">
-        <!-- Page Summary -->
-        <div class="section">
-            <div class="section-title">Page Analysis</div>
-            <div class="card" id="pageSummary">
-                <p>Loading analysis...</p>
-            </div>
-        </div>
-
-        <!-- Detected Categories -->
-        <div class="section">
-            <div class="section-title">Legal Terms Detected</div>
-            <div class="card">
-                <div class="risk-list" id="categoriesList">
-                    <div class="empty-state">
-                        No legal terms detected on this page.
-                    </div>
-                </div>
-            </div>
-        </div>
-
         <!-- Clause Q&A -->
         <div class="section">
             <div class="section-title">Clause Q&A</div>
@@ -810,6 +923,26 @@
             <p style="font-size: 12px; color: #9ca3af; text-align: center; margin-top: 8px; font-style: italic;">
                 All your questions stay local — we never send them anywhere.
             </p>
+        </div>
+
+        <!-- Page Summary -->
+        <div class="section">
+            <div class="section-title">Page Analysis</div>
+            <div class="card" id="pageSummary">
+                <p>Loading analysis...</p>
+            </div>
+        </div>
+
+        <!-- Detected Categories -->
+        <div class="section">
+            <div class="section-title">Legal Terms Detected</div>
+            <div class="card">
+                <div class="risk-list" id="categoriesList">
+                    <div class="empty-state">
+                        No legal terms detected on this page.
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
