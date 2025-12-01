@@ -17,7 +17,7 @@
       "32": "icons/icon32.png"
     }
   },
-  "permissions": ["contextMenus","storage","scripting","activeTab","tabs","sidePanel"],
+  "permissions": ["contextMenus","storage","tabs","sidePanel"],
   "host_permissions": ["<all_urls>"],
   "side_panel": { "default_path": "sidepanel.html" },
   "background": { "service_worker": "background.js", "type": "module" },
