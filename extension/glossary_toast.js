@@ -352,7 +352,9 @@ if (
         function getToastCopy(found) {
             const title = 'Legal terms detected';
             let subtitle = 'Review key restrictions before you proceed.';
-            const map = {
+            let tip = 'Open the panel for a full breakdown.';
+
+            const subtitleMap = {
                 'rights_&_obligations': 'Legal obligations detected — review liability and responsibilities.',
                 'data_&_privacy': 'Privacy terms detected — check data collection and sharing.',
                 'payment_&_subscription': 'Payment terms detected — review fees, refund, and renewal.',
@@ -361,9 +363,22 @@ if (
                 'user_conduct': 'User conduct rules detected — review acceptable use policies.',
                 'miscellaneous': 'Legal terms detected — review key restrictions before you proceed.'
             };
+
+            // Concrete, specific action the user can take right now
+            const tipMap = {
+                'rights_&_obligations': 'Check for an arbitration clause — it waives your right to sue in court.',
+                'data_&_privacy': 'Go to account Settings → Privacy after signing up to opt out of data sharing.',
+                'payment_&_subscription': 'Note the trial end date and set a reminder to cancel before you are charged.',
+                'legal_risks_&_disclaimer': 'Check what compensation (if any) you get if the service fails or harms you.',
+                'intellectual_property': 'Look for "royalty-free license" — it means the platform can use your uploads.',
+                'user_conduct': 'Review prohibited content to avoid having your account suspended.',
+                'miscellaneous': 'Read the full terms before clicking "I agree" — especially any opt-out clauses.'
+            };
+
             const key = (found?.cat || '').toLowerCase().replace(/\s+/g, '_');
-            if (map[key]) subtitle = map[key];
-            return { title, subtitle };
+            if (subtitleMap[key]) subtitle = subtitleMap[key];
+            if (tipMap[key]) tip = tipMap[key];
+            return { title, subtitle, tip };
         }
 
         function ensureHighlightStyle() {
@@ -519,8 +534,8 @@ if (
             }
         }
 
-        function showToast({ title, subtitle, allPatterns }) {
-            console.log('[LegalGuard] showToast called with:', { title, subtitle });
+        function showToast({ title, subtitle, tip, allPatterns }) {
+            console.log('[LegalGuard] showToast called with:', { title, subtitle, tip });
             
             const root = ensureToastRoot();
             console.log('[LegalGuard] Toast root element:', root);
@@ -534,18 +549,19 @@ if (
             root.innerHTML = '';
             const el = document.createElement('div');
             el.className = 'lg-toast';
+            const tipHtml = tip
+                ? `<div style="font-size:12px;color:#1e40af;background:#eff6ff;border-left:3px solid #3b82f6;border-radius:0 6px 6px 0;padding:6px 8px;margin:8px 0;line-height:1.4;"><strong>What to do:</strong> ${tip}</div>`
+                : '';
             el.innerHTML = `
                 <div class="lg-toast-content">
                     <div class="lg-toast-icon"><img src="${chrome.runtime.getURL('icons/1024.png')}" alt="LegalGuard" /></div>
                     <div class="lg-toast-body">
                         <div class="lg-toast-title">${title}</div>
                         <div class="lg-toast-message">${subtitle}</div>
+                        ${tipHtml}
                         <div class="lg-toast-actions">
                             <button class="lg-btn lg-btn-primary" id="lg-primary">Highlight key risks</button>
                             <button class="lg-btn lg-btn-ghost" id="lg-secondary">Prepare for full analysis</button>
-                        </div>
-                        <div class="lg-toast-hint" style="font-size: 12px; color: #666; margin-top: 8px; text-align: center;">
-                            💡 Tip: You can also open it from the Chrome extension panel.
                         </div>
                         <button class="lg-toast-dismiss" id="lg-mute">Dismiss for this site</button>
                     </div>
@@ -921,7 +937,7 @@ if (
                     toastCount: LG_TOAST_COUNT,
                     seenCount: LG_SEEN.size
                 });
-                showToast({ title: copy.title, subtitle: copy.subtitle, allPatterns });
+                showToast({ title: copy.title, subtitle: copy.subtitle, tip: copy.tip, allPatterns });
             } else {
                 console.log('[LegalGuard] No legal terms found in this scan');
             }
