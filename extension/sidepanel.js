@@ -2096,12 +2096,97 @@ Current page context:`;
 
         // Render page summary
         this.renderPageSummary();
-        
+
         // Render categories
         this.renderCategories();
-        
+
         // Update highlight controls
         this.updateHighlightControls();
+
+        // Fetch ToS;DR rating asynchronously (non-blocking)
+        this.fetchAndRenderTosDr();
+    }
+
+    async fetchAndRenderTosDr() {
+        try {
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (!tab?.url) return;
+            const domain = new URL(tab.url).hostname;
+            const rating = await this.fetchTosDrRating(domain);
+            this.renderTosDrBanner(rating);
+        } catch (e) {
+            console.warn('[LegalGuard] ToS;DR render error:', e);
+        }
+    }
+
+    async fetchTosDrRating(domain) {
+        try {
+            const query = domain.replace(/^www\./, '');
+            const response = await fetch(
+                `https://api.tosdr.org/search/v4/?query=${encodeURIComponent(query)}`,
+                { signal: AbortSignal.timeout(6000) }
+            );
+            if (!response.ok) return null;
+            const data = await response.json();
+
+            // API v4 returns { parameters: { services: [...] } }
+            const services = data?.parameters?.services ?? data?.services ?? [];
+            if (!services.length) return null;
+
+            // Prefer an exact domain match, fall back to first result
+            const matched = services.find(s =>
+                s.urls?.some(u => {
+                    const clean = u.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0];
+                    return clean === query || query.endsWith(clean);
+                })
+            ) ?? services[0];
+
+            if (!matched) return null;
+
+            return {
+                name: matched.name,
+                rating: matched.rating?.letter ?? matched.rating?.human ?? '?',
+                id: matched.id,
+                slug: matched.slug ?? String(matched.id)
+            };
+        } catch (e) {
+            console.warn('[LegalGuard] ToS;DR fetch failed:', e);
+            return null;
+        }
+    }
+
+    renderTosDrBanner(rating) {
+        const container = document.getElementById('tosdr-banner');
+        if (!container) return;
+
+        if (!rating) {
+            container.style.display = 'none';
+            return;
+        }
+
+        const gradeConfig = {
+            'A': { bg: '#f0fdf4', border: '#22c55e', badge: '#16a34a', label: 'Good' },
+            'B': { bg: '#f0fdf4', border: '#86efac', badge: '#15803d', label: 'Acceptable' },
+            'C': { bg: '#fffbeb', border: '#fcd34d', badge: '#b45309', label: 'Mixed' },
+            'D': { bg: '#fff7ed', border: '#fb923c', badge: '#c2410c', label: 'Concerning' },
+            'E': { bg: '#fef2f2', border: '#f87171', badge: '#b91c1c', label: 'Bad' }
+        };
+
+        const grade = (rating.rating || '?').toUpperCase();
+        const cfg = gradeConfig[grade] ?? { bg: '#f8fafc', border: '#cbd5e1', badge: '#64748b', label: 'Unrated' };
+        const tosdrUrl = `https://tosdr.org/en/service/${rating.slug}`;
+
+        container.style.display = 'block';
+        container.innerHTML = `
+            <div class="tosdr-banner" style="background:${cfg.bg};border:1px solid ${cfg.border};border-radius:10px;display:flex;align-items:center;gap:10px;padding:10px 12px;">
+                <div class="tosdr-grade" style="flex-shrink:0;width:36px;height:36px;border-radius:8px;background:${cfg.badge};color:#fff;font-weight:700;font-size:18px;display:flex;align-items:center;justify-content:center;">${grade}</div>
+                <div style="flex:1;min-width:0;">
+                    <div style="font-size:11px;color:#64748b;font-weight:500;">ToS;DR Community Rating</div>
+                    <div style="font-size:13px;font-weight:600;color:#1a1a1a;">${rating.name} — <span style="color:${cfg.badge};">${cfg.label}</span></div>
+                </div>
+                <a href="${tosdrUrl}" target="_blank" rel="noopener" style="flex-shrink:0;font-size:18px;color:#64748b;text-decoration:none;" title="View full report on ToS;DR">↗</a>
+            </div>
+        `;
     }
 
     renderPageSummary() {
@@ -2935,8 +3020,8 @@ Current page context:`;
         const categoriesList = document.getElementById('categoriesList');
         if (!categoriesList) return;
 
-        const { categories, detectionDetails } = this.currentData;
-        
+        const { categories } = this.currentData;
+
         if (!categories || Object.keys(categories).length === 0) {
             categoriesList.innerHTML = '<div class="empty-state">No legal terms detected on this page.</div>';
             return;
@@ -2964,25 +3049,41 @@ Current page context:`;
             'Miscellaneous': 'low'
         };
 
+        // Actionable advice: what should the user actually DO?
+        const actionableAdvice = {
+            'Data & Privacy': 'Go to account Settings → Privacy and opt out of data sharing and targeted advertising.',
+            'Rights & Obligations': 'Look for arbitration clauses — they waive your right to sue in court. If present, consider whether you need this service.',
+            'Payment & Subscription': 'Note your free trial end date and set a calendar reminder 2 days before to cancel if needed.',
+            'Legal Risks & Disclaimer': 'Check what happens if the service causes you harm — limited liability clauses may reduce your recourse.',
+            'Intellectual Property': 'Verify you keep full ownership of anything you upload. Look for phrases like "royalty-free license" — they mean the platform can use your content.',
+            'User Conduct': 'Review the prohibited content list so you know what could get your account suspended.',
+            'Miscellaneous': 'Read the full terms for anything unusual before clicking "I agree".'
+        };
+
         categoriesList.innerHTML = Object.entries(categories).map(([category, terms]) => {
             const icon = categoryIcons[category] || '📋';
             const severity = severityMap[category] || 'low';
             const severityClass = `badge-${severity}`;
             const severityText = severity.charAt(0).toUpperCase() + severity.slice(1);
+            const advice = actionableAdvice[category] || 'Review these terms carefully before proceeding.';
 
-            // Show actual terms found in this category
             const uniqueTerms = [...new Set(terms)];
             const termsList = uniqueTerms.slice(0, 3).join(', ') + (uniqueTerms.length > 3 ? '...' : '');
 
             return `
-                <div class="risk-item">
-                    <span class="risk-icon">${icon}</span>
-                    <div class="risk-content">
-                        <div class="risk-header">
-                            <span class="risk-name">${category}</span>
-                            <span class="badge ${severityClass}">${severityText}</span>
+                <div class="risk-item" style="flex-direction:column;align-items:flex-start;gap:6px;">
+                    <div style="display:flex;align-items:center;gap:8px;width:100%;">
+                        <span class="risk-icon">${icon}</span>
+                        <div class="risk-content" style="flex:1;">
+                            <div class="risk-header">
+                                <span class="risk-name">${category}</span>
+                                <span class="badge ${severityClass}">${severityText}</span>
+                            </div>
+                            <p class="risk-description">${terms.length} term${terms.length !== 1 ? 's' : ''} detected: ${termsList}</p>
                         </div>
-                        <p class="risk-description">${terms.length} term${terms.length !== 1 ? 's' : ''} detected: ${termsList}</p>
+                    </div>
+                    <div style="margin-left:32px;padding:6px 10px;background:#f0f9ff;border-left:3px solid #3b82f6;border-radius:0 6px 6px 0;font-size:12px;color:#1e40af;line-height:1.4;">
+                        <strong>What to do:</strong> ${advice}
                     </div>
                 </div>
             `;
