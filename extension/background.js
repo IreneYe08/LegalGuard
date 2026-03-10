@@ -424,6 +424,115 @@ if (hasRuntime && chrome.runtime.onMessage?.addListener) {
             return true;
         }
         
+        // Handle ANALYZE_POLICY_LINKS: fetch policy pages and do quick risk scan
+        if (request?.type === 'ANALYZE_POLICY_LINKS') {
+            const tabId = sender?.tab?.id;
+            const urls = request?.urls || [];
+            if (!urls.length) {
+                sendResponse({ success: false, error: 'No URLs provided' });
+                return false;
+            }
+
+            (async () => {
+                try {
+                    // Load glossary for risk matching
+                    const glossaryUrl = chrome.runtime.getURL('glossary_tri.json');
+                    let glossary = [];
+                    try {
+                        const gRes = await fetch(glossaryUrl);
+                        const gJson = await gRes.json();
+                        glossary = Array.isArray(gJson) ? gJson : (gJson.glossary || []);
+                    } catch (e) {
+                        console.warn('[LG] Could not load glossary for policy analysis:', e);
+                    }
+
+                    // Risk level by category
+                    const HIGH_RISK_CATS = new Set([
+                        'Legal Risks & Disclaimer', 'Rights & Obligations', 'Intellectual Property'
+                    ]);
+                    const MED_RISK_CATS = new Set([
+                        'Data & Privacy', 'Payment & Subscription', 'User Conduct'
+                    ]);
+
+                    const allRisks = [];
+                    const policyTexts = [];
+
+                    for (const url of urls.slice(0, 4)) { // limit to 4 links
+                        try {
+                            const res = await fetch(url, {
+                                signal: AbortSignal.timeout(10000),
+                                headers: { 'Accept': 'text/html,application/xhtml+xml' }
+                            });
+                            if (!res.ok) continue;
+                            const html = await res.text();
+
+                            // Strip HTML tags (service worker has no DOMParser)
+                            const text = html
+                                .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+                                .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+                                .replace(/<[^>]+>/g, ' ')
+                                .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+                                .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+                                .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+                                .replace(/\s+/g, ' ').trim()
+                                .slice(0, 60000);
+
+                            policyTexts.push({ url, text });
+
+                            // Run glossary patterns against policy text
+                            const seenCats = new Set();
+                            for (const item of glossary) {
+                                if (!item?.term || !item?.category) continue;
+                                if (seenCats.has(item.category)) continue;
+                                try {
+                                    const re = new RegExp(item.term, 'i');
+                                    const match = text.match(re);
+                                    if (match) {
+                                        seenCats.add(item.category);
+                                        const idx = match.index || 0;
+                                        const snippet = text.slice(Math.max(0, idx - 30), idx + match[0].length + 80).replace(/\s+/g, ' ');
+                                        const level = HIGH_RISK_CATS.has(item.category) ? 'high'
+                                            : MED_RISK_CATS.has(item.category) ? 'medium' : 'low';
+                                        allRisks.push({
+                                            category: item.category,
+                                            phrase: match[0],
+                                            summary: snippet.slice(0, 120),
+                                            level,
+                                            sourceUrl: url
+                                        });
+                                    }
+                                } catch (e) { /* skip bad pattern */ }
+                            }
+                        } catch (fetchErr) {
+                            console.warn('[LG] Failed to fetch policy URL:', url, fetchErr?.message);
+                        }
+                    }
+
+                    // Sort: high > medium > low
+                    const levelOrder = { high: 0, medium: 1, low: 2 };
+                    allRisks.sort((a, b) => levelOrder[a.level] - levelOrder[b.level]);
+
+                    // Store for side panel
+                    if (tabId) {
+                        await chrome.storage.local.set({
+                            [`lg:policyRisks:${tabId}`]: {
+                                risks: allRisks,
+                                policyTexts: policyTexts.map(p => ({ url: p.url, text: p.text.slice(0, 20000) })),
+                                analyzedAt: Date.now(),
+                                pageUrl: request?.pageUrl || ''
+                            }
+                        });
+                    }
+
+                    sendResponse({ success: true, risks: allRisks });
+                } catch (err) {
+                    console.error('[LG] Policy analysis error:', err);
+                    sendResponse({ success: false, error: err?.message || String(err) });
+                }
+            })();
+            return true; // keep channel open for async response
+        }
+
         // If no action matches, don't return true
         return false;
     });

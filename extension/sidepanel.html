@@ -837,6 +837,91 @@
             text-align: center;
             padding: 4px 16px 6px;
         }
+        /* ---- Policy Risk Alert panel ---- */
+        #policyRiskAlert {
+            display: none;
+            margin: 0;
+            padding: 12px 16px;
+            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+            border-bottom: 2px solid #ef4444;
+            color: #f8fafc;
+            font-size: 13px;
+            flex-shrink: 0;
+        }
+        #policyRiskAlert.has-risks { border-color: #ef4444; }
+        #policyRiskAlert.no-risks  { border-color: #22c55e; }
+        #policyRiskAlert.med-risks { border-color: #f59e0b; }
+
+        .policy-alert-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+        .policy-alert-title {
+            font-weight: 700;
+            font-size: 13px;
+            flex: 1;
+        }
+        .policy-alert-dismiss {
+            background: none;
+            border: none;
+            color: #64748b;
+            cursor: pointer;
+            font-size: 18px;
+            line-height: 1;
+            padding: 0;
+        }
+        .policy-risk-row {
+            background: rgba(255,255,255,0.05);
+            border-radius: 6px;
+            padding: 6px 8px;
+            margin-bottom: 4px;
+            font-size: 11px;
+            line-height: 1.4;
+        }
+        .policy-risk-cat {
+            font-weight: 700;
+            margin-right: 4px;
+        }
+        .policy-risk-cat.high   { color: #ef4444; }
+        .policy-risk-cat.medium { color: #f59e0b; }
+        .policy-risk-cat.low    { color: #94a3b8; }
+        .policy-risk-snippet    { color: #cbd5e1; }
+        .policy-alert-more {
+            font-size: 10px;
+            color: #64748b;
+            text-align: center;
+            margin: 4px 0 6px;
+        }
+        .policy-alert-ai-btn {
+            width: 100%;
+            padding: 7px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-weight: 600;
+            font-size: 12px;
+            cursor: pointer;
+            margin-top: 6px;
+        }
+        .policy-alert-ai-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        #policyAiSummary {
+            display: none;
+            margin-top: 8px;
+            background: rgba(255,255,255,0.07);
+            border-radius: 6px;
+            padding: 8px;
+            font-size: 11px;
+            color: #cbd5e1;
+            line-height: 1.5;
+            max-height: 200px;
+            overflow-y: auto;
+        }
     </style>
 </head>
 
@@ -850,6 +935,21 @@
         <div class="header-actions">
             <button class="mute-button" id="muteToggleBtn" type="button" title="Mute notifications" aria-label="Mute notifications" aria-pressed="false">🔔</button>
         </div>
+    </div>
+
+    <!-- Policy Risk Alert (shown when policy links detected on registration page) -->
+    <div id="policyRiskAlert">
+        <div class="policy-alert-header">
+            <span id="policyAlertIcon" style="font-size:18px;">⚠️</span>
+            <span class="policy-alert-title" id="policyAlertTitle">Scanning policy documents…</span>
+            <button class="policy-alert-dismiss" id="policyAlertDismiss" title="Dismiss">&times;</button>
+        </div>
+        <div id="policyRiskRows"></div>
+        <div class="policy-alert-more" id="policyAlertMore"></div>
+        <button class="policy-alert-ai-btn" id="policyAiAnalyzeBtn">
+            ✨ Deep AI Analysis (uses local AI)
+        </button>
+        <div id="policyAiSummary"></div>
     </div>
 
     <!-- Main Content -->

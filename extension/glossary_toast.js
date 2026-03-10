@@ -1165,4 +1165,190 @@ if (
                 parent.normalize();
             });
         }
+
+        /* -------------------- Registration-page policy scanner -------------------- */
+
+        function isRegistrationPage() {
+            try {
+                const urlLower = location.href.toLowerCase();
+                const urlPatterns = ['/signup', '/sign-up', '/register', '/join',
+                    '/create-account', '/create_account', '/enroll', '/get-started',
+                    '/new-account', '/newaccount'];
+                if (urlPatterns.some(p => urlLower.includes(p))) return true;
+
+                // Form with both email + password fields
+                const forms = document.querySelectorAll('form');
+                for (const form of forms) {
+                    const hasPwd = form.querySelector('input[type="password"]');
+                    const hasEmail = form.querySelector(
+                        'input[type="email"], input[name*="email" i], input[id*="email" i]'
+                    );
+                    if (hasPwd && hasEmail) return true;
+                }
+
+                // Page heading / title hints
+                const headingText = [
+                    document.title,
+                    document.querySelector('h1')?.textContent || '',
+                    document.querySelector('h2')?.textContent || ''
+                ].join(' ').toLowerCase();
+                const signupKw = ['sign up', 'signup', 'register', 'create account',
+                    'create your account', 'join now', 'get started', 'new account'];
+                if (signupKw.some(k => headingText.includes(k))) return true;
+
+                return false;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function findPolicyLinks() {
+            const patterns = [
+                /privacy\s*policy/i,
+                /terms\s*(of\s*(service|use)|and\s*conditions?|&\s*conditions?)/i,
+                /user\s*agreement/i,
+                /cookie\s*policy/i,
+                /privacy\s*notice/i,
+                /legal\s*(notice|terms)/i,
+                /conditions?\s*(of\s*use|générales?)/i,
+                /条款|隐私|プライバシー|利用規約|개인정보/i
+            ];
+
+            const links = [];
+            const seen = new Set();
+            document.querySelectorAll('a[href]').forEach(a => {
+                const text = (a.textContent || '').trim();
+                const href = a.getAttribute('href') || '';
+                if (!text || !href || href.startsWith('#') || href.startsWith('javascript:')) return;
+                if (!patterns.some(p => p.test(text) || p.test(href))) return;
+                let url;
+                try { url = new URL(href, location.href).href; } catch (e) { return; }
+                if (seen.has(url)) return;
+                seen.add(url);
+                links.push({ url, text: text.slice(0, 80) });
+            });
+            return links;
+        }
+
+        function showPolicyRiskToast(policyLinks, state, risks) {
+            const root = ensureToastRoot();
+            if (!root) return;
+
+            // Remove previous policy toast if any
+            const prev = root.querySelector('.lg-policy-toast');
+            if (prev) prev.remove();
+
+            const toast = document.createElement('div');
+            toast.className = 'lg-policy-toast';
+            toast.style.cssText = [
+                'background:#1e293b',
+                'border:2px solid #f59e0b',
+                'border-radius:12px',
+                'padding:14px 16px',
+                'margin-bottom:10px',
+                'max-width:340px',
+                'box-shadow:0 8px 24px rgba(0,0,0,0.35)',
+                'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+                'color:#f8fafc',
+                'position:relative'
+            ].join(';');
+
+            const linkNames = policyLinks.map(l => l.text).join(' · ');
+
+            if (state === 'scanning') {
+                toast.innerHTML = `
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+                        <span style="font-size:18px;">📋</span>
+                        <span style="font-weight:700;font-size:13px;color:#f59e0b;">Policy Links Detected</span>
+                    </div>
+                    <div style="font-size:11px;color:#94a3b8;margin-bottom:6px;">${linkNames}</div>
+                    <div style="font-size:11px;color:#64748b;font-style:italic;">Scanning for risks…</div>`;
+            } else {
+                // done
+                const count = risks ? risks.length : 0;
+                const highCount = risks ? risks.filter(r => r.level === 'high').length : 0;
+                const borderColor = highCount > 0 ? '#ef4444' : count > 0 ? '#f59e0b' : '#22c55e';
+                const icon = highCount > 0 ? '🚨' : count > 0 ? '⚠️' : '✅';
+                const headColor = highCount > 0 ? '#ef4444' : count > 0 ? '#f59e0b' : '#22c55e';
+                const headline = count === 0
+                    ? 'No major risks found'
+                    : `${count} risk${count !== 1 ? 's' : ''} found in policies`;
+
+                toast.style.borderColor = borderColor;
+
+                const riskRows = (risks || []).slice(0, 3).map(r => {
+                    const c = r.level === 'high' ? '#ef4444' : r.level === 'medium' ? '#f59e0b' : '#94a3b8';
+                    return `<div style="background:#0f172a;border-radius:6px;padding:6px 8px;font-size:11px;margin-bottom:4px;">
+                        <span style="color:${c};font-weight:600;">[${r.category}]</span>
+                        <span style="color:#cbd5e1;"> ${r.summary.slice(0, 100)}</span>
+                    </div>`;
+                }).join('');
+
+                const moreLabel = count > 3
+                    ? `<div style="font-size:10px;color:#64748b;text-align:center;margin-bottom:6px;">+${count - 3} more — open panel for full report</div>`
+                    : '';
+
+                toast.innerHTML = `
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+                        <span style="font-size:18px;">${icon}</span>
+                        <span style="font-weight:700;font-size:13px;color:${headColor};">${headline}</span>
+                        <button class="lg-policy-close" style="margin-left:auto;background:none;border:none;color:#64748b;cursor:pointer;font-size:18px;line-height:1;">&times;</button>
+                    </div>
+                    <div style="font-size:11px;color:#94a3b8;margin-bottom:8px;">${linkNames}</div>
+                    ${riskRows}${moreLabel}
+                    <button class="lg-policy-open-panel" style="width:100%;padding:8px;background:linear-gradient(135deg,#667eea,#764ba2);border:none;border-radius:8px;color:white;font-weight:600;font-size:12px;cursor:pointer;">
+                        View Full Risk Analysis
+                    </button>`;
+
+                toast.querySelector('.lg-policy-close')?.addEventListener('click', () => toast.remove());
+                toast.querySelector('.lg-policy-open-panel')?.addEventListener('click', () => {
+                    safeRuntimeSendMessage({ action: 'openSidePanel' });
+                });
+            }
+
+            root.insertBefore(toast, root.firstChild);
+        }
+
+        async function detectAndAnalyzePolicyLinks() {
+            try {
+                if (!isRegistrationPage()) return;
+
+                const policyLinks = findPolicyLinks();
+                if (!policyLinks.length) return;
+
+                console.log('[LegalGuard] Registration page + policy links detected:', policyLinks);
+
+                // Deduplicate across page navigations
+                const cacheKey = 'lg:policyScanned:' + location.pathname;
+                if (sessionStorage.getItem(cacheKey)) return;
+                sessionStorage.setItem(cacheKey, '1');
+
+                // Show "scanning" toast immediately
+                showPolicyRiskToast(policyLinks, 'scanning', null);
+
+                // Ask background to fetch & analyse
+                safeRuntimeSendMessage(
+                    {
+                        type: 'ANALYZE_POLICY_LINKS',
+                        urls: policyLinks.map(l => l.url),
+                        pageUrl: location.href
+                    },
+                    (response) => {
+                        if (response?.success) {
+                            showPolicyRiskToast(policyLinks, 'done', response.risks || []);
+                        } else {
+                            // Dismiss scanning toast on error silently
+                            const root = document.querySelector('.lg-toast-wrapper');
+                            root?.querySelector('.lg-policy-toast')?.remove();
+                            console.warn('[LegalGuard] Policy analysis failed:', response?.error);
+                        }
+                    }
+                );
+            } catch (e) {
+                console.warn('[LegalGuard] detectAndAnalyzePolicyLinks error:', e);
+            }
+        }
+
+        // Run policy detection after the page is settled (after initial scan)
+        setTimeout(detectAndAnalyzePolicyLinks, 2000);
     })();

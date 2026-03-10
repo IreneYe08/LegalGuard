@@ -73,6 +73,9 @@ class LegalGuardSidePanel {
         
         // Check for selected text from context menu and auto-fill
         await this.checkForSelectedText();
+
+        // Check for policy risk data from registration page scans
+        await this.checkForPendingPolicyAnalysis();
     }
 
     cacheUIElements() {
@@ -3089,10 +3092,147 @@ Current page context:`;
         if (categoriesList) {
             categoriesList.innerHTML = `<div class="empty-state">${message}</div>`;
         }
-        
+
         const controls = document.getElementById('highlightControls');
         if (controls) {
             controls.style.display = 'none';
+        }
+    }
+
+    /* ---- Policy Risk Alert ---- */
+
+    async checkForPendingPolicyAnalysis() {
+        try {
+            if (!this.currentTabId) return;
+            const key = `lg:policyRisks:${this.currentTabId}`;
+            const result = await chrome.storage.local.get([key]);
+            const data = result[key];
+            if (!data) return;
+
+            // Only show if analysed within last 10 minutes
+            if (Date.now() - (data.analyzedAt || 0) > 10 * 60 * 1000) return;
+
+            this.policyData = data;
+            this.renderPolicyRiskAlert(data.risks || []);
+        } catch (e) {
+            console.warn('[LegalGuard] checkForPendingPolicyAnalysis error:', e);
+        }
+    }
+
+    renderPolicyRiskAlert(risks) {
+        const alertEl = document.getElementById('policyRiskAlert');
+        const titleEl = document.getElementById('policyAlertTitle');
+        const iconEl  = document.getElementById('policyAlertIcon');
+        const rowsEl  = document.getElementById('policyRiskRows');
+        const moreEl  = document.getElementById('policyAlertMore');
+        const aiBtn   = document.getElementById('policyAiAnalyzeBtn');
+        const dismissBtn = document.getElementById('policyAlertDismiss');
+
+        if (!alertEl) return;
+
+        const highCount = risks.filter(r => r.level === 'high').length;
+        const medCount  = risks.filter(r => r.level === 'medium').length;
+
+        // Set colour class
+        alertEl.classList.remove('has-risks', 'med-risks', 'no-risks');
+        if (highCount > 0) {
+            alertEl.classList.add('has-risks');
+            iconEl.textContent  = '🚨';
+            titleEl.textContent = `${risks.length} risk${risks.length !== 1 ? 's' : ''} found in policy documents`;
+        } else if (medCount > 0 || risks.length > 0) {
+            alertEl.classList.add('med-risks');
+            iconEl.textContent  = '⚠️';
+            titleEl.textContent = `${risks.length} item${risks.length !== 1 ? 's' : ''} flagged in policy documents`;
+        } else {
+            alertEl.classList.add('no-risks');
+            iconEl.textContent  = '✅';
+            titleEl.textContent = 'No major risks found in policy documents';
+        }
+
+        // Render top rows
+        rowsEl.innerHTML = risks.slice(0, 4).map(r => `
+            <div class="policy-risk-row">
+                <span class="policy-risk-cat ${r.level}">[${r.category}]</span>
+                <span class="policy-risk-snippet">${this.escapeHtml(r.summary.slice(0, 110))}</span>
+            </div>`).join('');
+
+        moreEl.textContent = risks.length > 4
+            ? `+${risks.length - 4} more risks detected — use AI analysis for full report`
+            : '';
+
+        // AI button only available when AI is ready
+        if (aiBtn) {
+            aiBtn.disabled = !this.aiAvailable;
+            aiBtn.title = this.aiAvailable ? '' : 'AI model not ready — complete download first';
+            aiBtn.addEventListener('click', () => this.runPolicyAiAnalysis());
+        }
+
+        // Dismiss
+        if (dismissBtn) {
+            dismissBtn.addEventListener('click', () => {
+                alertEl.style.display = 'none';
+            });
+        }
+
+        alertEl.style.display = 'block';
+    }
+
+    escapeHtml(str) {
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+    }
+
+    async runPolicyAiAnalysis() {
+        const aiBtn      = document.getElementById('policyAiAnalyzeBtn');
+        const summaryEl  = document.getElementById('policyAiSummary');
+        if (!aiBtn || !summaryEl) return;
+        if (!this.aiAvailable || !this.aiSession) return;
+        if (!this.policyData) return;
+
+        aiBtn.disabled   = true;
+        aiBtn.textContent = 'Analysing…';
+        summaryEl.style.display = 'block';
+        summaryEl.textContent   = 'Generating AI risk summary…';
+
+        try {
+            const risks = this.policyData.risks || [];
+            const texts = (this.policyData.policyTexts || [])
+                .map(p => p.text.slice(0, 8000))
+                .join('\n\n---\n\n');
+
+            const prompt = `You are LegalGuard, an expert legal risk analyst.
+
+Below are excerpts from one or more privacy policy / terms of service documents found on a registration page.
+
+POLICY EXCERPTS:
+${texts.slice(0, 20000)}
+
+QUICK-SCAN RISKS ALREADY DETECTED (${risks.length} items):
+${risks.slice(0, 10).map(r => `- [${r.level.toUpperCase()}] ${r.category}: ${r.summary}`).join('\n')}
+
+Your task:
+1. Summarise the TOP 5 most important risks a user should know before agreeing.
+2. For each risk, state: the category, why it matters in plain language, and what the user could do.
+3. Give an overall risk verdict: LOW / MEDIUM / HIGH.
+4. Use bullet points. Keep each point under 2 sentences. No HTML.`;
+
+            const stream = this.aiSession.promptStreaming(prompt);
+            let full = '';
+            summaryEl.textContent = '';
+            for await (const chunk of stream) {
+                full += chunk;
+                summaryEl.textContent = full;
+            }
+
+            aiBtn.textContent = '✅ AI Analysis Complete';
+        } catch (err) {
+            console.error('[LegalGuard] Policy AI analysis error:', err);
+            summaryEl.textContent = 'AI analysis failed. Please try again.';
+            aiBtn.disabled   = false;
+            aiBtn.textContent = '✨ Deep AI Analysis (uses local AI)';
         }
     }
 }
